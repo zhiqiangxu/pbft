@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package pb;
+
+message NodeLoginInput {
+  int64 timestamp = 1;
+  int32 index = 2;
+  bytes sign = 3;
+}
+
+message NodeLoginOutput {
+  int32 code = 1;
+  string msg = 2;
+}
+
+message NodeInfo {
+  string addr = 1;
+  string publicKey = 2;
+}
+
+message PBFTInfoOutput {
+  int32 code = 1;
+  string msg = 2;
+  repeated NodeInfo nodes = 3;
+  int64 view = 4;
+}
+
+message ClientAddr {
+  string protocol = 1;
+  string addr = 2;
+}
+
+message ClientMsgRequestInput {
+  int64 timestamp = 1;
+  uint32 nonce = 2;
+  bytes data = 3;
+  ClientAddr clientAddr = 4;
+}
+
+message ClientMsgRequestOutput {
+  int32 code = 1;
+  string msg = 2;
+}
+
+message ClientMsgReplyInput {
+  string hash = 1;
+  bytes reply = 2;
+  bytes sign = 3;
+  int32 index = 4;
+}
+
+message NodePrePreparePiggyBackedMsg {
+  int64 view = 1;
+  int64 n = 2;
+  repeated string hash = 3;
+  repeated ClientMsgRequestInput clientMsgRequestInput = 4;
+}
+
+message LookupMessageHashInput { repeated string hash = 1; }
+
+message LookupMessageHashOutput {
+  int32 code = 1;
+  string msg = 2;
+  repeated ClientMsgRequestInput clientMsgRequestInput = 3;
+}
+
+message NodePreparedMsg {
+  int64 view = 1;
+  int64 n = 2;
+  string hash = 3;
+}
+
+message NodeCommitMsg {
+  int64 view = 1;
+  int64 n = 2;
+  string hash = 3;
+}
+
+message NodeCheckpointMsg {
+  message NodeCheckpointMsgContent {
+    int64 n = 1;
+    string stateHash = 2;
+  }
+  NodeCheckpointMsgContent checkpointMsgContent = 1;
+  int32 index = 2;
+  string sign = 3;
+}
+
+message NodeViewChangeMsg {
+  message NodePreparedSignedMsg {
+    NodePreparedMsg preparedMsg = 1;
+    int32 index = 2;
+    string sign = 3;
+  }
+  int64 view = 1;
+  int64 n = 2;
+  repeated NodeCheckpointMsg checkpointMsg = 3;
+  repeated NodePreparedSignedMsg preparedSignedMsg = 4;
+  string sign = 5;
+}
+
+message NodeNewViewMsg {
+  message NodePrePrepareMsg {
+    int64 view = 1;
+    int64 n = 2;
+    string messageRequestDigest = 3;
+  }
+  int64 view = 1;
+  repeated NodeViewChangeMsg viewChangeMsg = 2;
+  repeated NodePrePrepareMsg prePrepareMsg = 3;
+}
+
+message NodeReqSignPreparedInput { NodePreparedMsg preparedMsg = 1; }
+
+message NodeReqSignPreparedOutput {
+  int32 code = 1;
+  string msg = 2;
+  string sign = 3;
+}
