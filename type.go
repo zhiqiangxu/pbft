@@ -17,6 +17,7 @@ type FSM interface {
 
 	InitConsensusConfig(*ConsensusConfig) // also updates history peers
 	UpdteConsensusPeers([]PeerInfo)       // also updates history peers
+	GetIndexByPubkey(pk Pubkey) uint32
 	GetConsensusConfig() *ConsensusConfig
 	GetHistoryPeers() []PeerInfo
 	GetV() (uint64, error)
@@ -106,7 +107,7 @@ type Net interface {
 
 // Account ...
 type Account interface {
-	PublicKey() string
+	PublicKey() Pubkey
 	Sign([]byte) ([]byte, error)
 }
 
@@ -115,9 +116,9 @@ type PBFT interface {
 	SetFSM(FSM)
 	GetFSM() FSM
 	SetNet(Net)
+	GetNet() Net
 	SetAccount(Account)
 	SetConfig(Config)
-	GetNet() Net
 
 	Start() error
 	Stop() error
@@ -351,9 +352,10 @@ func (nv *NewViewMsg) Serialization(sink *common.ZeroCopySink) {
 
 // SyncClientMessageReq ...
 type SyncClientMessageReq struct {
+	ReqID uint64 // updated by msg syncer
 	Signature
-	N      uint64
-	Digest string
+	N               uint64
+	ClientMsgDigest string
 }
 
 // Type of msg
@@ -378,6 +380,7 @@ func (sync *SyncClientMessageReq) Serialization(sink *common.ZeroCopySink) {
 
 // SyncClientMessageResp ...
 type SyncClientMessageResp struct {
+	ReqID uint64
 	ClientMsg
 }
 
@@ -403,6 +406,7 @@ func (sync *SyncClientMessageResp) Serialization(sink *common.ZeroCopySink) {
 
 // SyncSealedClientMessageReq ...
 type SyncSealedClientMessageReq struct {
+	ReqID uint64
 	Signature
 	N uint64
 }
@@ -429,8 +433,9 @@ func (sync *SyncSealedClientMessageReq) Serialization(sink *common.ZeroCopySink)
 
 // SyncSealedClientMessageResp ...
 type SyncSealedClientMessageResp struct {
+	ReqID uint64
 	ClientMsg
-	*CommitMsg
+	CommitMsgs []*CommitMsg
 }
 
 // Type of msg

@@ -2,7 +2,7 @@ package pbft
 
 type msgPool struct {
 	rounds map[uint64]*consensusRound // indexed by N
-	pbft   PBFT
+	pbft   *pbft
 }
 
 type roundMsg struct {
@@ -18,7 +18,7 @@ type consensusRound struct {
 	roundMsg
 }
 
-func newMsgPool(pbft PBFT) *msgPool {
+func newMsgPool(pbft *pbft) *msgPool {
 	return &msgPool{pbft: pbft, rounds: make(map[uint64]*consensusRound)}
 }
 
@@ -58,6 +58,10 @@ func (pool *msgPool) AddCommitMsg(msg *CommitMsg) (added bool, commitLocal bool)
 
 // AddViewChangeMsg will add just enough msg to start new-view
 func (pool *msgPool) AddViewChangeMsg(msg *ViewChangeMsg) (added bool, enough bool) {
+	return
+}
+
+func (pool *msgPool) GetViewChangeMsgs(newView uint64) (v []*ViewChangeMsg) {
 	return
 }
 

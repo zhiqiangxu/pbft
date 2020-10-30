@@ -7,6 +7,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zhiqiangxu/util"
 )
@@ -27,6 +28,7 @@ type pbft struct {
 	doneCh       chan struct{}
 	wg           sync.WaitGroup
 	msgPool      *msgPool
+	msgSyncer    *msgSyncer
 }
 
 // Status of pbft
@@ -49,6 +51,7 @@ const (
 func New() PBFT {
 	bft := &pbft{doneCh: make(chan struct{})}
 	bft.msgPool = newMsgPool(bft)
+	bft.msgSyncer = newMsgSyncer(bft)
 	return bft
 }
 
@@ -114,7 +117,7 @@ func (bft *pbft) Start() (err error) {
 
 	bft.view = consensusConfig.View
 	bft.n = consensusConfig.N
-	bft.onUpdateConsensusPeers(consensusConfig.Peers)
+	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
 
 	err = bft.setStatus(StatusStarting)
 	if err != nil {
@@ -139,20 +142,17 @@ func (bft *pbft) Start() (err error) {
 }
 
 func (bft *pbft) onUpdateConsensusPeers(peers []PeerInfo) {
-	// get index by public key
-	pubKey := bft.account.PublicKey()
-	index := uint32(math.MaxUint32)
-	for _, peer := range peers {
-		if pubKey == string(peer.Pubkey) {
-			index = peer.Index
+	if bft.accountIndex == uint32(math.MaxUint32) {
+		// get index by public key
+		pubKey := bft.account.PublicKey()
+		for _, peer := range peers {
+			if pubKey == peer.Pubkey {
+				bft.accountIndex = peer.Index
+			}
 		}
 	}
 
-	bft.accountIndex = index
-
-	if bft.net != nil {
-		bft.net.OnUpdateConsensusPeers(peers)
-	}
+	bft.net.OnUpdateConsensusPeers(peers)
 }
 
 func (bft *pbft) Stop() (err error) {
@@ -169,7 +169,24 @@ func (bft *pbft) Stop() (err error) {
 	return
 }
 
+func (bft *pbft) handleSyncResp(ctx context.Context, msg Msg) (handled bool, err error) {
+	mt := msg.Type()
+	if mt == MessageTypeSyncClientMessageResp || mt == MessageTypeSyncSealedClientMessageResp {
+		handled = true
+
+		err = bft.msgSyncer.onSyncResp(ctx, msg)
+		return
+	}
+
+	return
+}
 func (bft *pbft) Send(ctx context.Context, msg Msg) (err error) {
+
+	handled, err := bft.handleSyncResp(ctx, msg)
+	if handled {
+		return
+	}
+
 	select {
 	case bft.msgC <- msg:
 	case <-ctx.Done():
@@ -198,12 +215,8 @@ func (bft *pbft) handleMsg() (err error) {
 				err = bft.handleNewViewMsg(msg.(*NewViewMsg))
 			case MessageTypeSyncClientMessageReq:
 				err = bft.handleSyncClientMessageReq(msg.(*SyncClientMessageReq))
-			case MessageTypeSyncClientMessageResp:
-				err = bft.handleSyncClientMessageResp(msg.(*SyncClientMessageResp))
 			case MessageTypeSyncSealedClientMessageReq:
 				err = bft.handleSyncSealedClientMessageReq(msg.(*SyncSealedClientMessageReq))
-			case MessageTypeSyncSealedClientMessageResp:
-				err = bft.handleSyncSealedClientMessageResp(msg.(*SyncSealedClientMessageResp))
 			default:
 				err = fmt.Errorf("unexpected msg type:%v", msg.Type())
 			}
@@ -323,8 +336,40 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 	if msg.View == bft.view {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
+			if msg.N > bft.n {
+				for n := bft.n; n < msg.N; n++ {
+					var resp *SyncSealedClientMessageResp
+					for {
+						resp, err = bft.msgSyncer.SyncSealedClientMsg(context.Background(), n)
+						if err != nil {
+							time.Sleep(time.Second)
+							log.Println("SyncSealedClientMsg err", err)
+							continue
+						}
+
+						bft.fsm.Exec(resp.ClientMsg)
+						bft.fsm.AddClientMsgAndProof(resp.ClientMsg, resp.CommitMsgs)
+						break
+					}
+
+				}
+
+			}
 			// persist to db
 			clientMsg := bft.msgPool.GetClientMsg(msg.N)
+			if clientMsg == nil {
+				var resp *SyncClientMessageResp
+				for {
+					resp, err = bft.msgSyncer.SyncClientMsg(context.Background(), msg.N, msg.ClientMsgDigest)
+					if err != nil {
+						time.Sleep(time.Second)
+						log.Println("SyncClientMsg err", err)
+						continue
+					}
+					clientMsg = resp.ClientMsg
+					break
+				}
+			}
 			bft.fsm.Exec(clientMsg)
 			bft.fsm.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
 			bft.fsm.Commit()
@@ -344,12 +389,15 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 	if msg.NewView > bft.view && bft.primaryOfView(msg.NewView) == bft.accountIndex {
 		if added, enough := bft.msgPool.AddViewChangeMsg(msg); added && enough {
 			var nv *NewViewMsg
-			nv, err = bft.constructNewViewMsg()
+			v, o := bft.msgPool.GetVO(msg.NewView)
+			nv, err = bft.constructNewViewMsg(msg.NewView, v, o)
 			if err != nil {
 				return
 			}
 			bft.msgPool.AddNewViewMsg(nv)
 			bft.net.Broadcast(nv)
+
+			atomic.StoreUint64(&bft.view, msg.NewView)
 		}
 	} else {
 		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", bft.primaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
@@ -357,7 +405,31 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 	return
 }
 
-func (bft *pbft) constructNewViewMsg() (msg *NewViewMsg, err error) {
+func (bft *pbft) constructNewViewMsg(newView uint64, v []*ViewChangeMsg, o []*PrePrepareMsg) (msg *NewViewMsg, err error) {
+	msg = &NewViewMsg{NewView: newView, V: v, O: o, Signature: Signature{PeerIndex: bft.accountIndex}}
+	digest := msg.SignatureDigest()
+	sig, err := bft.account.Sign(util.Slice(digest))
+	msg.Signature.Sig = sig
+	return
+}
+
+func (bft *pbft) constructSyncClientMsgReq(n uint64, clientMsgDigest string) (msg *SyncClientMessageReq, err error) {
+	msg = &SyncClientMessageReq{N: n, ClientMsgDigest: clientMsgDigest, Signature: Signature{PeerIndex: bft.accountIndex}}
+
+	digest := msg.SignatureDigest()
+	sig, err := bft.account.Sign(util.Slice(digest))
+	msg.Signature.Sig = sig
+
+	return
+}
+
+func (bft *pbft) constructSyncSealedClientMsgReq(n uint64) (msg *SyncSealedClientMessageReq, err error) {
+	msg = &SyncSealedClientMessageReq{N: n, Signature: Signature{PeerIndex: bft.accountIndex}}
+
+	digest := msg.SignatureDigest()
+	sig, err := bft.account.Sign(util.Slice(digest))
+	msg.Signature.Sig = sig
+
 	return
 }
 
@@ -394,21 +466,19 @@ func (bft *pbft) handleSyncClientMessageReq(msg *SyncClientMessageReq) (err erro
 		clientMsg = bft.fsm.GetClientMsg(msg.N)
 	}
 
-	if clientMsg != nil && clientMsg.Digest() == msg.Digest {
-		bft.net.SendTo(msg.PeerIndex, &SyncClientMessageResp{clientMsg})
+	if clientMsg != nil && clientMsg.Digest() == msg.ClientMsgDigest {
+		bft.net.SendTo(msg.PeerIndex, &SyncClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg})
 	}
 	return
 }
 
-func (bft *pbft) handleSyncClientMessageResp(msg *SyncClientMessageResp) (err error) {
-	return
-}
-
 func (bft *pbft) handleSyncSealedClientMessageReq(msg *SyncSealedClientMessageReq) (err error) {
-	return
-}
+	clientMsg, commitMsgs := bft.fsm.GetClientMsgAndProof(msg.N)
+	if clientMsg == nil {
+		return
+	}
 
-func (bft *pbft) handleSyncSealedClientMessageResp(msg *SyncSealedClientMessageResp) (err error) {
+	bft.net.SendTo(msg.PeerIndex, &SyncSealedClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg, CommitMsgs: commitMsgs})
 	return
 }
 
