@@ -14,10 +14,8 @@ import (
 
 type pbft struct {
 	// accessed by atomic
-	view     uint64
-	n        uint64
-	inflight int64
-	status   Status
+	view uint64 // current view
+	n    uint64 // next n to seal
 
 	fsm          FSM
 	net          Net
@@ -30,22 +28,6 @@ type pbft struct {
 	msgPool      *msgPool
 	msgSyncer    *msgSyncer
 }
-
-// Status of pbft
-type Status uint32
-
-const (
-	// StatusInit ...
-	StatusInit Status = iota
-	// StatusStarting ...
-	StatusStarting
-	// StatusStarted ...
-	StatusStarted
-	// StatusStopping ...
-	StatusStopping
-	// StatusStopped ...
-	StatusStopped
-)
 
 // New a PBFT
 func New() PBFT {
@@ -67,6 +49,10 @@ func (bft *pbft) SetNet(net Net) {
 	bft.net = net
 }
 
+func (bft *pbft) GetNet() Net {
+	return bft.net
+}
+
 func (bft *pbft) SetAccount(account Account) {
 	bft.account = account
 }
@@ -76,7 +62,7 @@ func (bft *pbft) SetConfig(config Config) {
 
 	err := config.Validate()
 	if err != nil {
-		panic(fmt.Sprintf("invalid config:%v", config))
+		panic(fmt.Sprintf("invalid config:%v", err))
 	}
 
 	if config.TuningOptions == nil {
@@ -84,10 +70,6 @@ func (bft *pbft) SetConfig(config Config) {
 	}
 
 	bft.config = &config
-}
-
-func (bft *pbft) GetNet() Net {
-	return bft.net
 }
 
 func (bft *pbft) Start() (err error) {
@@ -106,67 +88,81 @@ func (bft *pbft) Start() (err error) {
 		return
 	}
 
-	consensusConfig := bft.fsm.GetConsensusConfig()
-	if consensusConfig == nil {
-		consensusConfig = bft.config.ConsensusConfig
-		bft.fsm.InitConsensusConfig(consensusConfig)
-		bft.fsm.Commit()
-	} else {
-		bft.config.ConsensusConfig = consensusConfig
-	}
-
-	bft.view = consensusConfig.View
-	bft.n = consensusConfig.N
-	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
-
-	err = bft.setStatus(StatusStarting)
-	if err != nil {
-		return
-	}
-
 	if bft.net == nil {
 		bft.net = defaultNet()
 	}
+	bft.net.SetPBFT(bft)
+
+	initConsensusConfig := bft.fsm.GetInitConsensusConfig()
+	if initConsensusConfig == nil {
+		initConsensusConfig = bft.config.InitConsensusConfig
+		err = initConsensusConfig.Validate()
+		if err != nil {
+			return
+		}
+		if initConsensusConfig.CheckpointInterval == 0 {
+			initConsensusConfig.CheckpointInterval = defaultCheckpointInterval
+		}
+		if initConsensusConfig.HighWaterMark == 0 {
+			initConsensusConfig.HighWaterMark = defaultHighWaterMark
+		}
+		bft.fsm.InitConsensusConfig(initConsensusConfig)
+		bft.fsm.Commit()
+	} else {
+		// load from db
+		bft.config.InitConsensusConfig = initConsensusConfig
+	}
+
+	bft.config.consensusConfig = bft.fsm.GetConsensusConfig()
+	bft.view = bft.config.consensusConfig.View
+	if bft.config.consensusConfig.N != nil {
+		bft.n = *bft.config.consensusConfig.N + 1
+	} else {
+		bft.n = bft.config.InitConsensusConfig.N
+	}
+	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
 
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
-
-	bft.net.SetPBFT(bft)
 
 	util.GoFunc(&bft.wg, func() {
 		err := bft.handleMsg()
 		log.Println("handleMsg quit", err)
 	})
 
-	err = bft.setStatus(StatusStarted)
 	return
 }
 
-func (bft *pbft) onUpdateConsensusPeers(peers []PeerInfo) {
-	if bft.accountIndex == uint32(math.MaxUint32) {
+func (bft *pbft) Stop() (err error) {
+
+	close(bft.doneCh)
+
+	bft.wg.Wait()
+
+	return
+}
+
+const (
+	// NonConsensusIndex is index for public keys never ever in consensus
+	NonConsensusIndex = uint32(math.MaxUint32)
+)
+
+func (bft *pbft) onUpdateConsensusPeers(fromPeers, toPeers []PeerInfo) {
+	if bft.accountIndex == NonConsensusIndex {
 		// get index by public key
 		pubKey := bft.account.PublicKey()
-		for _, peer := range peers {
+		for _, peer := range toPeers {
 			if pubKey == peer.Pubkey {
 				bft.accountIndex = peer.Index
 			}
 		}
 	}
 
-	bft.net.OnUpdateConsensusPeers(peers)
+	bft.net.OnUpdateConsensusPeers(toPeers)
+
+	bft.config.consensusConfig.Peers = toPeers
 }
 
-func (bft *pbft) Stop() (err error) {
-	err = bft.setStatus(StatusStopping)
-	if err != nil {
-		return
-	}
-
-	close(bft.doneCh)
-
-	bft.wg.Wait()
-
-	err = bft.setStatus(StatusStopped)
-	return
+func (bft *pbft) onUpdateView(view uint64) {
 }
 
 func (bft *pbft) handleSyncResp(ctx context.Context, msg Msg) (handled bool, err error) {
@@ -180,6 +176,7 @@ func (bft *pbft) handleSyncResp(ctx context.Context, msg Msg) (handled bool, err
 
 	return
 }
+
 func (bft *pbft) Send(ctx context.Context, msg Msg) (err error) {
 
 	handled, err := bft.handleSyncResp(ctx, msg)
@@ -205,6 +202,8 @@ func (bft *pbft) handleMsg() (err error) {
 			switch msg.Type() {
 			case MessageTypeClient:
 				err = bft.handleClientMsg(msg.(ClientMsg))
+			case MessageTypePrePreparePiggybacked:
+				err = bft.handlePrePreparePiggybackedMsg(msg.(*PrePreparePiggybackedMsg))
 			case MessageTypePrepare:
 				err = bft.handlePrepareMsg(msg.(*PrepareMsg))
 			case MessageTypeCommit:
@@ -213,6 +212,8 @@ func (bft *pbft) handleMsg() (err error) {
 				err = bft.handleViewChangeMsg(msg.(*ViewChangeMsg))
 			case MessageTypeNewView:
 				err = bft.handleNewViewMsg(msg.(*NewViewMsg))
+			case MessageTypeCheckpoint:
+				err = bft.handleCheckpointMsg(msg.(*CheckpointMsg))
 			case MessageTypeSyncClientMessageReq:
 				err = bft.handleSyncClientMessageReq(msg.(*SyncClientMessageReq))
 			case MessageTypeSyncSealedClientMessageReq:
@@ -221,7 +222,7 @@ func (bft *pbft) handleMsg() (err error) {
 				err = fmt.Errorf("unexpected msg type:%v", msg.Type())
 			}
 			if err != nil {
-				log.Println("handleMsg err, msg", msg)
+				log.Println("handleMsg err, msg", msg, "err", err)
 				err = nil
 			}
 		case <-bft.doneCh:
@@ -232,7 +233,7 @@ func (bft *pbft) handleMsg() (err error) {
 }
 
 func (bft *pbft) isPrimary() bool {
-	return bft.accountIndex == bft.config.Peers[atomic.LoadUint64(&bft.view)%uint64(len(bft.config.Peers))].Index
+	return bft.accountIndex == bft.primary()
 }
 
 func (bft *pbft) primary() uint32 {
@@ -240,25 +241,64 @@ func (bft *pbft) primary() uint32 {
 }
 
 func (bft *pbft) primaryOfView(v uint64) uint32 {
-	return bft.config.Peers[v%uint64(len(bft.config.Peers))].Index
+	return bft.config.consensusConfig.Peers[v%uint64(len(bft.config.consensusConfig.Peers))].Index
+}
+
+func (bft *pbft) validateClientMsg(msg ClientMsg) (err error) {
+	digest := msg.Digest()
+	cm := bft.msgPool.GetClientMsgByDigest(digest)
+	if cm != nil {
+		err = fmt.Errorf("duplicate client msg:%v", digest)
+		return
+	}
+
+	cm = bft.fsm.GetClientMsgByDigest(digest)
+	if cm != nil {
+		err = fmt.Errorf("duplicate client msg:%v", digest)
+		return
+	}
+
+	return
+}
+
+func (bft *pbft) highestNAllowed() (highestN uint64) {
+	if bft.config.consensusConfig.LastCheckpoint != nil {
+		highestN = *bft.config.consensusConfig.LastCheckpoint + bft.config.consensusConfig.CheckpointInterval + bft.config.consensusConfig.HighWaterMark
+	} else {
+		highestN = bft.config.InitConsensusConfig.N + bft.config.consensusConfig.CheckpointInterval - 1 + bft.config.consensusConfig.HighWaterMark
+	}
+	return
 }
 
 func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
-	if !bft.isPrimary() {
-		bft.net.SendTo(bft.primary(), msg)
+
+	err = bft.validateClientMsg(msg)
+	if err != nil {
 		return
 	}
 
-	inflight := atomic.AddInt64(&bft.inflight, 1)
-	if inflight > bft.config.TuningOptions.MaxInflightMsg {
-		err = fmt.Errorf("max inflight message exceeded:%v", bft.config.TuningOptions.MaxInflightMsg)
-		atomic.AddInt64(&bft.inflight, -1)
+	primary := bft.primary()
+	if bft.accountIndex != primary {
+		bft.net.SendTo(primary, msg)
 		return
 	}
 
-	n := bft.n + uint64(inflight) - 1
+	var nextHighest uint64
+	highest, exists := bft.msgPool.HighestN()
+	if exists {
+		nextHighest = highest + 1
+	} else {
+		nextHighest = bft.n
+	}
 
-	ppp, err := bft.constructPrePreparePiggybackedMsg(bft.view, n, msg)
+	highestN := bft.highestNAllowed()
+
+	if nextHighest > highestN {
+		err = fmt.Errorf("high water mark exceeded:%v", highestN)
+		return
+	}
+
+	ppp, err := bft.constructPrePreparePiggybackedMsg(bft.view, nextHighest, msg)
 	if err != nil {
 		return
 	}
@@ -334,8 +374,9 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 }
 
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
-	if msg.View == bft.view {
+	if msg.View == bft.view && msg.N >= bft.n {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
+			// handle previous ones
 			if msg.N > bft.n {
 				for n := bft.n; n < msg.N; n++ {
 					var resp *SyncSealedClientMessageResp
@@ -351,9 +392,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 						bft.fsm.AddClientMsgAndProof(resp.ClientMsg, resp.CommitMsgs)
 						break
 					}
-
 				}
-
 			}
 			// persist to db
 			clientMsg := bft.msgPool.GetClientMsg(msg.N)
@@ -362,8 +401,8 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 				for {
 					resp, err = bft.msgSyncer.SyncClientMsg(context.Background(), msg.N, msg.ClientMsgDigest)
 					if err != nil {
-						time.Sleep(time.Second)
 						log.Println("SyncClientMsg err", err)
+						time.Sleep(time.Second)
 						continue
 					}
 					clientMsg = resp.ClientMsg
@@ -372,16 +411,39 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 			}
 			bft.fsm.Exec(clientMsg)
 			bft.fsm.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
-			bft.fsm.Commit()
 
-			// update memory
-			// TODO handle multiple inflight
-			bft.msgPool.Sealed(msg.N)
-			atomic.AddUint64(&bft.n, 1)
+			if bft.n%bft.config.consensusConfig.CheckpointInterval == 0 {
+				var checkPointMsg *CheckpointMsg
+				for {
+					checkPointMsg, err = bft.constructCheckpointMsg()
+					if err != nil {
+						log.Println("constructCheckpointMsg err", err)
+						time.Sleep(time.Second)
+						continue
+					}
+					break
+				}
+				if added, checkpointed := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
+					lastCheckpoint := checkPointMsg.N
+					bft.config.consensusConfig.LastCheckpoint = &lastCheckpoint
+					bft.fsm.UpdateLastCheckpoint(lastCheckpoint)
+					bft.msgPool.Sealed(msg.N)
+				}
+				bft.fsm.Commit()
+				bft.net.Broadcast(checkPointMsg)
+			} else {
+				bft.fsm.Commit()
+			}
+
+			atomic.AddUint64(&bft.n, msg.N+1)
 		}
 	} else {
 		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, bft.view = %v)", msg.View, bft.view)
 	}
+	return
+}
+
+func (bft *pbft) constructCheckpointMsg() (checkpointMsg *CheckpointMsg, err error) {
 	return
 }
 
@@ -458,6 +520,17 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 	return
 }
 
+func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
+	if added, checkpointed := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
+		lastCheckpoint := msg.N
+		bft.fsm.UpdateLastCheckpoint(lastCheckpoint)
+		bft.fsm.Commit()
+		bft.config.consensusConfig.LastCheckpoint = &lastCheckpoint
+		bft.msgPool.Sealed(msg.N)
+	}
+	return
+}
+
 func (bft *pbft) handleSyncClientMessageReq(msg *SyncClientMessageReq) (err error) {
 	var clientMsg ClientMsg
 	if bft.n <= msg.N {
@@ -479,36 +552,5 @@ func (bft *pbft) handleSyncSealedClientMessageReq(msg *SyncSealedClientMessageRe
 	}
 
 	bft.net.SendTo(msg.PeerIndex, &SyncSealedClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg, CommitMsgs: commitMsgs})
-	return
-}
-
-func (bft *pbft) setStatus(status Status) (err error) {
-	switch status {
-	case StatusStarting:
-		swapped := atomic.CompareAndSwapUint32((*uint32)(&bft.status), uint32(StatusInit), uint32(StatusStarting))
-		if !swapped {
-			err = fmt.Errorf("invalid status change: %v -> %v", atomic.LoadUint32((*uint32)(&bft.status)), uint32(StatusStarting))
-			return
-		}
-	case StatusStarted:
-		swapped := atomic.CompareAndSwapUint32((*uint32)(&bft.status), uint32(StatusStarting), uint32(StatusStarted))
-		if !swapped {
-			err = fmt.Errorf("invalid status change: %v -> %v", atomic.LoadUint32((*uint32)(&bft.status)), StatusStarted)
-			return
-		}
-	case StatusStopping:
-		swapped := atomic.CompareAndSwapUint32((*uint32)(&bft.status), uint32(StatusStarted), uint32(StatusStopping))
-		if !swapped {
-			err = fmt.Errorf("invalid status change: %v -> %v", atomic.LoadUint32((*uint32)(&bft.status)), uint32(StatusStopping))
-			return
-		}
-	case StatusStopped:
-		swapped := atomic.CompareAndSwapUint32((*uint32)(&bft.status), uint32(StatusStopping), uint32(StatusStopped))
-		if !swapped {
-			err = fmt.Errorf("invalid status change: %v -> %v", atomic.LoadUint32((*uint32)(&bft.status)), StatusStopped)
-			return
-		}
-	}
-
 	return
 }

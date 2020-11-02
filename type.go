@@ -9,20 +9,23 @@ import (
 
 // FSM for deterministic state machine
 type FSM interface {
-	Exec(ClientMsg)
+	Exec(ClientMsg) (changed bool, fromPeers, toPeers []PeerInfo)
 
 	AddClientMsgAndProof(ClientMsg, []*CommitMsg) // N is implicitly saved
 	GetClientMsgAndProof(n uint64) (ClientMsg, []*CommitMsg)
 	GetClientMsg(n uint64) ClientMsg
+	GetClientMsgByDigest(digest string) ClientMsg
 
-	InitConsensusConfig(*ConsensusConfig) // also updates history peers
-	UpdteConsensusPeers([]PeerInfo)       // also updates history peers
-	GetIndexByPubkey(pk Pubkey) uint32
+	InitConsensusConfig(*InitConsensusConfig) // also updates history peers
+	UpdteConsensusPeers([]PeerInfo)           // also updates history peers
+	GetIndexByPubkey(pk Pubkey) uint32        // returns NonConsensusIndex if not found
 	GetConsensusConfig() *ConsensusConfig
+	GetInitConsensusConfig() *InitConsensusConfig
 	GetHistoryPeers() []PeerInfo
 	GetV() (uint64, error)
 	GetN() (uint64, error)
 	UpdateV(v uint64)
+	UpdateLastCheckpoint(checkPoint uint64)
 
 	Commit()
 }
@@ -57,17 +60,60 @@ type PeerInfo struct {
 
 // Config for pbft
 type Config struct {
-	*ConsensusConfig
 	NewClientMsgFunc func() ClientMsg
 	TuningOptions    *TuningOptions
+	// it only takes effects at the first time when bootstrap
+	InitConsensusConfig *InitConsensusConfig
+	// current consensus config
+	consensusConfig *ConsensusConfig
+}
+
+// InitConsensusConfig should never change since day 1
+type InitConsensusConfig struct {
+	GenesisMsg         ClientMsg // optional
+	Peers              []PeerInfo
+	View               uint64
+	N                  uint64
+	CheckpointInterval uint64
+	HighWaterMark      uint64
+}
+
+// Validate InitConsensusConfig
+func (iconfig *InitConsensusConfig) Validate() (err error) {
+	if iconfig == nil {
+		err = fmt.Errorf("InitConsensusConfig empty")
+		return
+	}
+	if len(iconfig.Peers) == 0 {
+		err = fmt.Errorf("InitConsensusConfig.Peers empty")
+		return
+	}
+
+	peerMap := make(map[uint32]bool)
+	for _, peer := range iconfig.Peers {
+		if _, ok := peerMap[peer.Index]; ok {
+			err = fmt.Errorf("duplicate peer index in InitConsensusConfig:%v", peer.Index)
+			return
+		}
+		peerMap[peer.Index] = true
+	}
+	return
 }
 
 // ConsensusConfig is persisted to db
 type ConsensusConfig struct {
-	Peers []PeerInfo
-	View  uint64
-	N     uint64
+	Peers              []PeerInfo
+	View               uint64
+	N                  *uint64
+	CheckpointInterval uint64
+	HighWaterMark      uint64
+	LastCheckpoint     *uint64
 }
+
+const (
+	defaultCheckpointInterval = uint64(1)
+	defaultHighWaterMark      = uint64(100)
+)
 
 // Validate a Config
 func (config *Config) Validate() (err error) {
@@ -75,15 +121,6 @@ func (config *Config) Validate() (err error) {
 	case config.NewClientMsgFunc == nil:
 		err = fmt.Errorf("NewClientMsgFunc empty")
 		return
-	default:
-		peerMap := make(map[uint32]bool)
-		for _, peer := range config.Peers {
-			if _, ok := peerMap[peer.Index]; ok {
-				err = fmt.Errorf("duplicate index in config:%v", peer.Index)
-				return
-			}
-			peerMap[peer.Index] = true
-		}
 	}
 
 	return
@@ -91,11 +128,10 @@ func (config *Config) Validate() (err error) {
 
 // TuningOptions for tuning
 type TuningOptions struct {
-	MsgCSize       int
-	MaxInflightMsg int64
+	MsgCSize int
 }
 
-var defaultTuningOptions = &TuningOptions{MsgCSize: 100, MaxInflightMsg: 1}
+var defaultTuningOptions = &TuningOptions{MsgCSize: 100}
 
 // Net for network related stuff
 type Net interface {
@@ -144,13 +180,15 @@ const (
 	MessageTypeViewChange
 	// MessageTypeNewView for new-view msg
 	MessageTypeNewView
+	// MessageTypeCheckpoint for checkpoint msg
+	MessageTypeCheckpoint
 
 	// MessageTypeSyncClientMessageReq for sync client msg
 	MessageTypeSyncClientMessageReq
-	// MessageTypeSyncClientMessageResp is resp to MessageTypeSyncClientMessageReq
-	MessageTypeSyncClientMessageResp
 	// MessageTypeSyncSealedClientMessageReq for sync client msg with proof
 	MessageTypeSyncSealedClientMessageReq
+	// MessageTypeSyncClientMessageResp is resp to MessageTypeSyncClientMessageReq
+	MessageTypeSyncClientMessageResp
 	// MessageTypeSyncSealedClientMessageResp is resp to MessageTypeSyncSealedClientMessageReq
 	MessageTypeSyncSealedClientMessageResp
 )
@@ -347,6 +385,33 @@ func (nv *NewViewMsg) Deserialization(source *common.ZeroCopySource) error {
 
 // Serialization a NewViewMsg
 func (nv *NewViewMsg) Serialization(sink *common.ZeroCopySink) {
+
+}
+
+// CheckpointMsg ...
+type CheckpointMsg struct {
+	Signature
+	N         uint64
+	StateRoot string
+}
+
+// Type of msg
+func (ckpt *CheckpointMsg) Type() MessageType {
+	return MessageTypeCheckpoint
+}
+
+// SignatureDigest of msg
+func (ckpt *CheckpointMsg) SignatureDigest() string {
+	return ""
+}
+
+// Deserialization a NewViewMsg
+func (ckpt *CheckpointMsg) Deserialization(source *common.ZeroCopySource) error {
+	return nil
+}
+
+// Serialization a NewViewMsg
+func (ckpt *CheckpointMsg) Serialization(sink *common.ZeroCopySink) {
 
 }
 

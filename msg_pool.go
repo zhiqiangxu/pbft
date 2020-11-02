@@ -22,6 +22,10 @@ func newMsgPool(pbft *pbft) *msgPool {
 	return &msgPool{pbft: pbft, rounds: make(map[uint64]*consensusRound)}
 }
 
+func (pool *msgPool) GetClientMsgByDigest(digest string) (msg ClientMsg) {
+	return
+}
+
 func (pool *msgPool) GetClientMsg(n uint64) (msg ClientMsg) {
 	round := pool.rounds[n]
 	if round == nil {
@@ -29,6 +33,10 @@ func (pool *msgPool) GetClientMsg(n uint64) (msg ClientMsg) {
 	}
 	msg = round.clientMsg
 	return
+}
+
+func (pool *msgPool) HighestN() (uint64, bool) {
+	return 0, false
 }
 
 func (pool *msgPool) GetCommitMsgs(n uint64) []*CommitMsg {
@@ -56,12 +64,16 @@ func (pool *msgPool) AddCommitMsg(msg *CommitMsg) (added bool, commitLocal bool)
 	return
 }
 
+func (pool *msgPool) AddCheckpointMsg(msg *CheckpointMsg) (added bool, checkpointed bool) {
+	return
+}
+
 // AddViewChangeMsg will add just enough msg to start new-view
 func (pool *msgPool) AddViewChangeMsg(msg *ViewChangeMsg) (added bool, enough bool) {
 	return
 }
 
-func (pool *msgPool) GetViewChangeMsgs(newView uint64) (v []*ViewChangeMsg) {
+func (pool *msgPool) GetVO(newView uint64) (v []*ViewChangeMsg, o []*PrePrepareMsg) {
 	return
 }
 

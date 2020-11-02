@@ -59,13 +59,12 @@ func (syncer *msgSyncer) SyncClientMsg(ctx context.Context, n uint64, clientMsgD
 	if err != nil {
 		return
 	}
+	ch := make(chan Msg, 1)
 
 	syncer.Lock()
 
 	msg.ReqID = syncer.nextID
 	syncer.nextID++
-
-	ch := make(chan Msg, 1)
 	syncer.respC[msg.ReqID] = ch
 
 	syncer.Unlock()
@@ -90,13 +89,13 @@ func (syncer *msgSyncer) SyncSealedClientMsg(ctx context.Context, n uint64) (res
 	if err != nil {
 		return
 	}
+	ch := make(chan Msg, 1)
 
 	syncer.Lock()
 
 	msg.ReqID = syncer.nextID
 	syncer.nextID++
 
-	ch := make(chan Msg, 1)
 	syncer.respC[msg.ReqID] = ch
 
 	syncer.Unlock()
