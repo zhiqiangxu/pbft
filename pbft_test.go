@@ -1,8 +1,11 @@
 package pbft
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"testing"
+	"time"
 
 	"github.com/ontio/ontology/common"
 )
@@ -14,27 +17,76 @@ func TestPBft(t *testing.T) {
 	account2 := RandAccount("")
 	account3 := RandAccount("")
 	account4 := RandAccount("")
+	accounts := []Account{account1, account2, account3, account4}
+	index1 := uint32(1)
+	index2 := uint32(2)
+	index3 := uint32(3)
+	index4 := uint32(4)
+	indices := []uint32{index1, index2, index3, index4}
 
 	bft1 := New()
-	bft1.SetAccount(account1)
-	bft1.SetConfig(Config{NewClientMsgFunc: newClientMsg, InitConsensusConfig: &InitConsensusConfig{
-		Peers: []PeerInfo{
-			{Index: 1, Pubkey: account1.PublicKey()},
-			{Index: 2, Pubkey: account2.PublicKey()},
-			{Index: 3, Pubkey: account3.PublicKey()},
-			{Index: 4, Pubkey: account4.PublicKey()},
-		},
-	}})
-	bft1.SetNet(nil)
-	bft1.SetFSM(newFSM())
+	bft2 := New()
+	bft3 := New()
+	bft4 := New()
+	bfts := []PBFT{bft1, bft2, bft3, bft4}
 
-	err := bft1.Start()
-	if err != nil {
-		t.Fatalf("Start failed:%v", err)
+	fsm1 := newTestFSM()
+	fsm2 := newTestFSM()
+	fsm3 := newTestFSM()
+	fsm4 := newTestFSM()
+	fsms := []*fsm{fsm1, fsm2, fsm3, fsm4}
+
+	net1 := newTestNet()
+	net2 := newTestNet()
+	net3 := newTestNet()
+	net4 := newTestNet()
+	nets := []*testNet{net1, net2, net3, net4}
+	index2netidx := map[uint32]int{}
+	for i := range nets {
+		index2netidx[indices[i]] = i
+	}
+	for i, net := range nets {
+		net.bft = bfts[i]
+		net.selfIndex = indices[i]
+		net.nets = nets
+		net.index2netidx = index2netidx
 	}
 
-	defer bft1.Stop()
+	for i, account := range accounts {
+		bfts[i].SetAccount(account)
+		bfts[i].SetConfig(&Config{NewClientMsgFunc: newClientMsg, InitConsensusConfig: &InitConsensusConfig{
+			Peers: []PeerInfo{
+				{Index: index1, Pubkey: account1.PublicKey()},
+				{Index: index2, Pubkey: account2.PublicKey()},
+				{Index: index3, Pubkey: account3.PublicKey()},
+				{Index: index4, Pubkey: account4.PublicKey()},
+			},
+		}})
+		bfts[i].SetFSM(fsms[i])
+		bfts[i].SetNet(nets[i])
+	}
 
+	for _, bft := range bfts {
+		err := bft.Start()
+		if err != nil {
+			t.Fatalf("Start failed:%v", err)
+		}
+
+		defer bft.Stop()
+	}
+
+	err := bft1.Send(context.Background(), &testClientMsg{n: 10})
+	if err != nil {
+		t.Fatalf("Send failed:%v", err)
+	}
+
+	time.Sleep(time.Second)
+
+	for _, fsm := range fsms {
+		if fsm.v != 10 {
+			t.Fatalf("fsm.v wrong:%v", fsm.v)
+		}
+	}
 }
 
 type testClientMsg struct {
@@ -64,6 +116,52 @@ func (msg *testClientMsg) Deserialization(source *common.ZeroCopySource) (err er
 	return
 }
 
+type testNet struct {
+	bft          PBFT
+	nets         []*testNet
+	selfIndex    uint32
+	index2netidx map[uint32]int
+}
+
+func (net *testNet) SetPBFT(bft PBFT) {
+	net.bft = bft
+}
+
+func (net *testNet) Broadcast(msg Msg) {
+
+	for index, netIndex := range net.index2netidx {
+		if index != net.selfIndex {
+			sink := common.NewZeroCopySink(nil)
+			msg.Serialization(sink)
+			payloadMsg := &PayloadMsg{Type: msg.Type(), Payload: sink.Bytes()}
+			net.nets[netIndex].onPayload(payloadMsg)
+		}
+	}
+}
+
+func (net *testNet) onPayload(payloadMsg *PayloadMsg) {
+	msg, err := payloadMsg.DeserializePayload(net.bft.GetConfig().NewClientMsgFunc)
+	if err != nil {
+		log.Fatal("DeserializePayload fail", err)
+	}
+	err = net.bft.Send(context.Background(), msg)
+	if err != nil {
+		log.Fatal("Send fail", err)
+	}
+}
+
+func (net *testNet) SendTo(peerIndex uint32, msg Msg) {
+
+}
+
+func (net *testNet) OnUpdateConsensusPeers([]PeerInfo) {
+
+}
+
+func newTestNet() *testNet {
+	return &testNet{}
+}
+
 func newClientMsg() ClientMsg {
 	return &testClientMsg{}
 }
@@ -72,6 +170,7 @@ type clientMsgAndProof struct {
 	clientMsg ClientMsg
 	commits   []*CommitMsg
 }
+
 type fsm struct {
 	v                      int64
 	clientMsgAndProof      map[uint64]clientMsgAndProof
@@ -81,7 +180,7 @@ type fsm struct {
 	pubkey2peer            map[Pubkey]PeerInfo
 }
 
-func newFSM() FSM {
+func newTestFSM() *fsm {
 	return &fsm{
 		clientMsgAndProof: make(map[uint64]clientMsgAndProof),
 		digest2N:          make(map[string]uint64),

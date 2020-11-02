@@ -118,6 +118,9 @@ const (
 // Validate a Config
 func (config *Config) Validate() (err error) {
 	switch {
+	case config == nil:
+		err = fmt.Errorf("config is nil")
+		return
 	case config.NewClientMsgFunc == nil:
 		err = fmt.Errorf("NewClientMsgFunc empty")
 		return
@@ -154,7 +157,8 @@ type PBFT interface {
 	SetNet(Net)
 	GetNet() Net
 	SetAccount(Account)
-	SetConfig(Config)
+	SetConfig(*Config)
+	GetConfig() *Config
 
 	Start() error
 	Stop() error
@@ -197,23 +201,103 @@ const (
 type PayloadMsg struct {
 	Type    MessageType
 	Payload []byte
-	msg     Msg
+}
+
+// DeserializePayload ...
+func (pm *PayloadMsg) DeserializePayload(newClientMsgFunc func() ClientMsg) (msg Msg, err error) {
+
+	switch pm.Type {
+	case MessageTypeClient:
+		msg = newClientMsgFunc()
+	case MessageTypePrePrepare:
+		msg = &PrePrepareMsg{}
+	case MessageTypePrePreparePiggybacked:
+		msg = &PrePreparePiggybackedMsg{}
+	case MessageTypePrepare:
+		msg = &PrepareMsg{}
+	case MessageTypeCommit:
+		msg = &CommitMsg{}
+	case MessageTypeViewChange:
+		msg = &ViewChangeMsg{}
+	case MessageTypeNewView:
+		msg = &NewViewMsg{}
+	case MessageTypeCheckpoint:
+		msg = &CheckpointMsg{}
+	case MessageTypeSyncClientMessageReq:
+		msg = &SyncClientMessageReq{}
+	case MessageTypeSyncSealedClientMessageReq:
+		msg = &SyncSealedClientMessageReq{}
+	case MessageTypeSyncClientMessageResp:
+		msg = &SyncClientMessageResp{}
+	case MessageTypeSyncSealedClientMessageResp:
+		msg = &SyncSealedClientMessageResp{}
+	default:
+		err = fmt.Errorf("invalid message type:%v", pm.Type)
+		return
+	}
+
+	source := common.NewZeroCopySource(pm.Payload)
+	err = msg.Deserialization(source)
+	if err != nil {
+		return
+	}
+	return
 }
 
 // Deserialization a PayloadMsg
-func (pm *PayloadMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (pm *PayloadMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	typeU32, eof := source.NextUint32()
+	if eof {
+		err = fmt.Errorf("PayloadMsg short read")
+		return
+	}
+	payload, _, irregular, eof := source.NextVarBytes()
+	if irregular || !eof {
+		err = fmt.Errorf("irregular:%v eof:%v", irregular, eof)
+		return
+	}
+
+	pm.Type = MessageType(typeU32)
+	pm.Payload = payload
+	return
 }
 
 // Serialization a PayloadMsg
 func (pm *PayloadMsg) Serialization(sink *common.ZeroCopySink) {
-
+	sink.WriteUint32(uint32(pm.Type))
+	sink.WriteVarBytes(pm.Payload)
 }
 
 // Signature ...
 type Signature struct {
 	PeerIndex uint32
 	Sig       []byte
+}
+
+// Deserialization a Signature
+func (sig *Signature) Deserialization(source *common.ZeroCopySource) (err error) {
+	peerIndex, eof := source.NextUint32()
+	if eof {
+		err = fmt.Errorf("Signature Deserialization short read")
+		return
+	}
+
+	sigBytes, _, irreg, _ := source.NextVarBytes()
+
+	if irreg {
+		err = fmt.Errorf("Signature Deserialization irregular data")
+		return
+	}
+
+	sig.PeerIndex = peerIndex
+	sig.Sig = sigBytes
+	return
+}
+
+// Serialization a Signature
+func (sig *Signature) Serialization(sink *common.ZeroCopySink) {
+	sink.WriteUint32(sig.PeerIndex)
+	sink.WriteVarBytes(sig.Sig)
 }
 
 // PrePrepareMsg ...

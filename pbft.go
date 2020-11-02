@@ -14,8 +14,8 @@ import (
 
 type pbft struct {
 	// accessed by atomic
-	view uint64 // current view
-	n    uint64 // next n to seal
+	view  uint64 // current view
+	nextn uint64 // next n to seal
 
 	fsm          FSM
 	net          Net
@@ -57,7 +57,7 @@ func (bft *pbft) SetAccount(account Account) {
 	bft.account = account
 }
 
-func (bft *pbft) SetConfig(config Config) {
+func (bft *pbft) SetConfig(config *Config) {
 	// TODO whether should allow call more than once?
 
 	err := config.Validate()
@@ -69,7 +69,11 @@ func (bft *pbft) SetConfig(config Config) {
 		config.TuningOptions = defaultTuningOptions
 	}
 
-	bft.config = &config
+	bft.config = config
+}
+
+func (bft *pbft) GetConfig() *Config {
+	return bft.config
 }
 
 func (bft *pbft) Start() (err error) {
@@ -116,9 +120,9 @@ func (bft *pbft) Start() (err error) {
 	bft.config.consensusConfig = bft.fsm.GetConsensusConfig()
 	bft.view = bft.config.consensusConfig.View
 	if bft.config.consensusConfig.N != nil {
-		bft.n = *bft.config.consensusConfig.N + 1
+		bft.nextn = *bft.config.consensusConfig.N + 1
 	} else {
-		bft.n = bft.config.InitConsensusConfig.N
+		bft.nextn = bft.config.InitConsensusConfig.N
 	}
 	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
 
@@ -288,7 +292,7 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 	if exists {
 		nextHighest = highest + 1
 	} else {
-		nextHighest = bft.n
+		nextHighest = bft.nextn
 	}
 
 	highestN := bft.highestNAllowed()
@@ -374,11 +378,11 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 }
 
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
-	if msg.View == bft.view && msg.N >= bft.n {
+	if msg.View == bft.view && msg.N >= bft.nextn {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
 			// handle previous ones
-			if msg.N > bft.n {
-				for n := bft.n; n < msg.N; n++ {
+			if msg.N > bft.nextn {
+				for n := bft.nextn; n < msg.N; n++ {
 					var resp *SyncSealedClientMessageResp
 					for {
 						resp, err = bft.msgSyncer.SyncSealedClientMsg(context.Background(), n)
@@ -412,7 +416,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 			bft.fsm.Exec(clientMsg)
 			bft.fsm.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
 
-			if bft.n%bft.config.consensusConfig.CheckpointInterval == 0 {
+			if bft.nextn%bft.config.consensusConfig.CheckpointInterval == 0 {
 				var checkPointMsg *CheckpointMsg
 				for {
 					checkPointMsg, err = bft.constructCheckpointMsg()
@@ -435,7 +439,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 				bft.fsm.Commit()
 			}
 
-			atomic.AddUint64(&bft.n, msg.N+1)
+			atomic.AddUint64(&bft.nextn, msg.N+1)
 		}
 	} else {
 		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, bft.view = %v)", msg.View, bft.view)
@@ -533,7 +537,7 @@ func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
 
 func (bft *pbft) handleSyncClientMessageReq(msg *SyncClientMessageReq) (err error) {
 	var clientMsg ClientMsg
-	if bft.n <= msg.N {
+	if bft.nextn <= msg.N {
 		clientMsg = bft.msgPool.GetClientMsg(msg.N)
 	} else {
 		clientMsg = bft.fsm.GetClientMsg(msg.N)
