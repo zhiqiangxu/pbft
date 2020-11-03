@@ -8,7 +8,8 @@ type net struct {
 	peerMap map[uint32]PeerInfo
 }
 
-func defaultNet() Net {
+// NewNet ...
+func NewNet() Net {
 	return &net{peerMap: make(map[uint32]PeerInfo)}
 }
 

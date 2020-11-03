@@ -16,9 +16,6 @@ import (
 
 type pbft struct {
 	config       *Config
-	fsm          FSM
-	net          Net
-	account      Account
 	accountIndex uint32
 	msgC         chan Msg
 	doneCh       chan struct{}
@@ -33,26 +30,6 @@ func New() PBFT {
 	bft.msgPool = newMsgPool(bft)
 	bft.msgSyncer = newMsgSyncer(bft)
 	return bft
-}
-
-func (bft *pbft) SetFSM(fsm FSM) {
-	bft.fsm = fsm
-}
-
-func (bft *pbft) GetFSM() FSM {
-	return bft.fsm
-}
-
-func (bft *pbft) SetNet(net Net) {
-	bft.net = net
-}
-
-func (bft *pbft) GetNet() Net {
-	return bft.net
-}
-
-func (bft *pbft) SetAccount(account Account) {
-	bft.account = account
 }
 
 func (bft *pbft) SetConfig(config *Config) {
@@ -75,23 +52,9 @@ func (bft *pbft) GetConfig() *Config {
 }
 
 func (bft *pbft) Start() (err error) {
-	if bft.config == nil {
-		err = fmt.Errorf("config empty")
-		return
-	}
-
-	if bft.account == nil {
-		err = fmt.Errorf("account empty")
-		return
-	}
-
-	if bft.fsm == nil {
-		err = fmt.Errorf("fsm empty")
-		return
-	}
 
 	// InitConsensusConfig for the first time
-	initConsensusConfig := bft.fsm.GetInitConsensusConfig()
+	initConsensusConfig := bft.config.FSM.GetInitConsensusConfig()
 	if initConsensusConfig == nil {
 		initConsensusConfig = bft.config.InitConsensusConfig
 		err = initConsensusConfig.Validate()
@@ -104,8 +67,8 @@ func (bft *pbft) Start() (err error) {
 		if initConsensusConfig.HighWaterMark == 0 {
 			initConsensusConfig.HighWaterMark = defaultHighWaterMark
 		}
-		bft.fsm.InitConsensusConfig(initConsensusConfig)
-		bft.fsm.Commit()
+		bft.config.FSM.InitConsensusConfig(initConsensusConfig)
+		bft.config.FSM.Commit()
 	} else {
 		// load from db
 		bft.config.InitConsensusConfig = initConsensusConfig
@@ -113,13 +76,9 @@ func (bft *pbft) Start() (err error) {
 
 	bft.loadConsensusConfig()
 
-	if bft.net == nil {
-		bft.net = defaultNet()
-	}
+	bft.config.Net.OnUpdateConsensusPeers(bft.config.FSM.GetHistoryPeers())
 
-	bft.net.OnUpdateConsensusPeers(bft.fsm.GetHistoryPeers())
-
-	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
+	bft.accountIndex = bft.config.FSM.GetIndexByPubkey(bft.config.Account.PublicKey())
 
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
 
@@ -132,7 +91,7 @@ func (bft *pbft) Start() (err error) {
 }
 
 func (bft *pbft) loadConsensusConfig() {
-	config := bft.fsm.GetConsensusConfig()
+	config := bft.config.FSM.GetConsensusConfig()
 	if config == nil {
 		log.Fatal("GetConsensusConfig returns nil")
 	}
@@ -160,7 +119,7 @@ const (
 func (bft *pbft) onUpdateConsensusPeers(fromPeers, toPeers []PeerInfo) {
 	if bft.accountIndex == NonConsensusIndex {
 		// get index by public key
-		pubKey := bft.account.PublicKey()
+		pubKey := bft.config.Account.PublicKey()
 		for _, peer := range toPeers {
 			if pubKey == peer.Pubkey {
 				bft.accountIndex = peer.Index
@@ -168,7 +127,7 @@ func (bft *pbft) onUpdateConsensusPeers(fromPeers, toPeers []PeerInfo) {
 		}
 	}
 
-	bft.net.OnUpdateConsensusPeers(toPeers)
+	bft.config.Net.OnUpdateConsensusPeers(toPeers)
 
 	bft.config.consensusConfig.Peers = toPeers
 }
@@ -252,7 +211,7 @@ func (bft *pbft) validateClientMsg(msg ClientMsg) (err error) {
 		return
 	}
 
-	cm = bft.fsm.GetClientMsgByDigest(digest)
+	cm = bft.config.FSM.GetClientMsgByDigest(digest)
 	if cm != nil {
 		err = fmt.Errorf("duplicate client msg:%v", digest)
 		return
@@ -277,7 +236,7 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 	primary := consensusConfig.Primary()
 	if bft.accountIndex != primary {
-		bft.net.SendTo(primary, msg)
+		bft.config.Net.SendTo(primary, msg)
 		return
 	}
 
@@ -303,7 +262,7 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 	}
 
 	bft.msgPool.AddPrepreparePiggybackedMsg(ppp)
-	bft.net.Broadcast(ppp)
+	bft.config.Net.Broadcast(ppp)
 
 	return
 }
@@ -313,7 +272,7 @@ func (bft *pbft) constructPrePreparePiggybackedMsg(v, n uint64, msg ClientMsg) (
 	ppp = &PrePreparePiggybackedMsg{ClientMsg: msg, PrePrepareMsg: PrePrepareMsg{Signature: Signature{PeerIndex: bft.accountIndex}, View: v, N: n, ClientMsgDigest: msg.Digest()}}
 
 	digest := ppp.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	ppp.Signature.Sig = sig
 	return
 }
@@ -329,7 +288,7 @@ func (bft *pbft) handlePrePreparePiggybackedMsg(msg *PrePreparePiggybackedMsg) (
 		}
 		bft.msgPool.AddPrepreparePiggybackedMsg(msg)
 		bft.msgPool.AddPrepareMsg(p)
-		bft.net.Broadcast(p)
+		bft.config.Net.Broadcast(p)
 	} else {
 		err = fmt.Errorf("invalid PrePreparePiggybackedMsg(msg.View = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.Primary = %v)", msg.View, consensusConfig.View, msg.PeerIndex, consensusConfig.Primary())
 	}
@@ -340,7 +299,7 @@ func (bft *pbft) constructPrepareMsg(msg *PrePrepareMsg) (p *PrepareMsg, err err
 	p = &PrepareMsg{View: msg.View, N: msg.N, ClientMsgDigest: msg.ClientMsgDigest, Signature: Signature{PeerIndex: bft.accountIndex}}
 
 	digest := p.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	p.Signature.Sig = sig
 
 	return
@@ -359,7 +318,7 @@ func (bft *pbft) handlePrepareMsg(msg *PrepareMsg) (err error) {
 				return
 			}
 			bft.msgPool.AddCommitMsg(c)
-			bft.net.Broadcast(c)
+			bft.config.Net.Broadcast(c)
 		}
 	} else {
 		err = fmt.Errorf("invalid PrepareMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
@@ -371,7 +330,7 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 	c = &CommitMsg{View: msg.View, N: msg.N, ClientMsgDigest: msg.ClientMsgDigest, Signature: Signature{PeerIndex: bft.accountIndex}}
 
 	digest := c.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	c.Signature.Sig = sig
 
 	return
@@ -394,8 +353,8 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 							continue
 						}
 
-						bft.fsm.Exec(resp.ClientMsg)
-						bft.fsm.AddClientMsgAndProof(resp.ClientMsg, resp.CommitMsgs)
+						bft.config.FSM.Exec(resp.ClientMsg)
+						bft.config.FSM.AddClientMsgAndProof(resp.ClientMsg, resp.CommitMsgs)
 						break
 					}
 				}
@@ -415,8 +374,8 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 			}
-			bft.fsm.Exec(clientMsg)
-			bft.fsm.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
+			bft.config.FSM.Exec(clientMsg)
+			bft.config.FSM.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
 
 			if msg.N == bft.config.consensusConfig.NextCheckpoint {
 				var checkPointMsg *CheckpointMsg
@@ -431,13 +390,13 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 				}
 				if added, checkpointed := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
 					nextCheckpoint := bft.config.consensusConfig.NextCheckpoint + consensusConfig.CheckpointInterval
-					bft.fsm.UpdateNextCheckpoint(nextCheckpoint)
+					bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
 					bft.msgPool.Sealed(msg.N)
 				}
-				bft.fsm.Commit()
-				bft.net.Broadcast(checkPointMsg)
+				bft.config.FSM.Commit()
+				bft.config.Net.Broadcast(checkPointMsg)
 			} else {
-				bft.fsm.Commit()
+				bft.config.FSM.Commit()
 			}
 
 			bft.loadConsensusConfig()
@@ -464,9 +423,9 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 				return
 			}
 			bft.msgPool.AddNewViewMsg(nv)
-			bft.net.Broadcast(nv)
+			bft.config.Net.Broadcast(nv)
 
-			bft.fsm.UpdateV(msg.NewView)
+			bft.config.FSM.UpdateV(msg.NewView)
 			bft.loadConsensusConfig()
 		}
 	} else {
@@ -478,7 +437,7 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 func (bft *pbft) constructNewViewMsg(newView uint64, v []*ViewChangeMsg, o []*PrePrepareMsg) (msg *NewViewMsg, err error) {
 	msg = &NewViewMsg{NewView: newView, V: v, O: o, Signature: Signature{PeerIndex: bft.accountIndex}}
 	digest := msg.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	msg.Signature.Sig = sig
 	return
 }
@@ -487,7 +446,7 @@ func (bft *pbft) constructSyncClientMsgReq(n uint64, clientMsgDigest string) (ms
 	msg = &SyncClientMessageReq{N: n, ClientMsgDigest: clientMsgDigest, Signature: Signature{PeerIndex: bft.accountIndex}}
 
 	digest := msg.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	msg.Signature.Sig = sig
 
 	return
@@ -497,7 +456,7 @@ func (bft *pbft) constructSyncSealedClientMsgReq(n uint64) (msg *SyncSealedClien
 	msg = &SyncSealedClientMessageReq{N: n, Signature: Signature{PeerIndex: bft.accountIndex}}
 
 	digest := msg.SignatureDigest()
-	sig, err := bft.account.Sign(util.Slice(digest))
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	msg.Signature.Sig = sig
 
 	return
@@ -516,10 +475,10 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 			}
 			bft.msgPool.AddPrePrepareMsg(pp)
 			bft.msgPool.AddPrepareMsg(p)
-			bft.net.Broadcast(p)
+			bft.config.Net.Broadcast(p)
 		}
-		bft.fsm.UpdateV(msg.NewView)
-		bft.fsm.Commit()
+		bft.config.FSM.UpdateV(msg.NewView)
+		bft.config.FSM.Commit()
 
 		bft.loadConsensusConfig()
 
@@ -534,8 +493,8 @@ func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
 	if added, checkpointed := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
 		consensusConfig := bft.getConsensusConfig()
 		nextCheckpoint := msg.N + consensusConfig.CheckpointInterval
-		bft.fsm.UpdateNextCheckpoint(nextCheckpoint)
-		bft.fsm.Commit()
+		bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
+		bft.config.FSM.Commit()
 		bft.config.consensusConfig.NextCheckpoint = nextCheckpoint
 		bft.msgPool.Sealed(msg.N)
 	}
@@ -549,21 +508,21 @@ func (bft *pbft) handleSyncClientMessageReq(msg *SyncClientMessageReq) (err erro
 	if consensusConfig.NextN <= msg.N {
 		clientMsg = bft.msgPool.GetClientMsg(msg.N)
 	} else {
-		clientMsg = bft.fsm.GetClientMsg(msg.N)
+		clientMsg = bft.config.FSM.GetClientMsg(msg.N)
 	}
 
 	if clientMsg != nil && clientMsg.Digest() == msg.ClientMsgDigest {
-		bft.net.SendTo(msg.PeerIndex, &SyncClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg})
+		bft.config.Net.SendTo(msg.PeerIndex, &SyncClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg})
 	}
 	return
 }
 
 func (bft *pbft) handleSyncSealedClientMessageReq(msg *SyncSealedClientMessageReq) (err error) {
-	clientMsg, commitMsgs := bft.fsm.GetClientMsgAndProof(msg.N)
+	clientMsg, commitMsgs := bft.config.FSM.GetClientMsgAndProof(msg.N)
 	if clientMsg == nil {
 		return
 	}
 
-	bft.net.SendTo(msg.PeerIndex, &SyncSealedClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg, CommitMsgs: commitMsgs})
+	bft.config.Net.SendTo(msg.PeerIndex, &SyncSealedClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg, CommitMsgs: commitMsgs})
 	return
 }

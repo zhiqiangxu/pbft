@@ -55,17 +55,18 @@ func TestPBft(t *testing.T) {
 
 	NewClientMsgFunc = newClientMsg
 	for i, account := range accounts {
-		bfts[i].SetAccount(account)
-		bfts[i].SetConfig(&Config{InitConsensusConfig: &InitConsensusConfig{
-			Peers: []PeerInfo{
-				{Index: index1, Pubkey: account1.PublicKey()},
-				{Index: index2, Pubkey: account2.PublicKey()},
-				{Index: index3, Pubkey: account3.PublicKey()},
-				{Index: index4, Pubkey: account4.PublicKey()},
-			},
-		}})
-		bfts[i].SetFSM(fsms[i])
-		bfts[i].SetNet(nets[i])
+		bfts[i].SetConfig(&Config{
+			FSM:     fsms[i],
+			Net:     nets[i],
+			Account: account,
+			InitConsensusConfig: &InitConsensusConfig{
+				Peers: []PeerInfo{
+					{Index: index1, Pubkey: account1.PublicKey()},
+					{Index: index2, Pubkey: account2.PublicKey()},
+					{Index: index3, Pubkey: account3.PublicKey()},
+					{Index: index4, Pubkey: account4.PublicKey()},
+				},
+			}})
 	}
 
 	for _, bft := range bfts {

@@ -69,7 +69,7 @@ func (syncer *msgSyncer) SyncClientMsg(ctx context.Context, n uint64, clientMsgD
 
 	syncer.Unlock()
 
-	syncer.bft.net.Broadcast(msg)
+	syncer.bft.config.Net.Broadcast(msg)
 
 	select {
 	case <-ctx.Done():
@@ -100,7 +100,7 @@ func (syncer *msgSyncer) SyncSealedClientMsg(ctx context.Context, n uint64) (res
 
 	syncer.Unlock()
 
-	syncer.bft.net.Broadcast(msg)
+	syncer.bft.config.Net.Broadcast(msg)
 
 	select {
 	case <-ctx.Done():

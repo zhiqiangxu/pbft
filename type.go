@@ -60,9 +60,12 @@ type PeerInfo struct {
 
 // Config for pbft
 type Config struct {
-	// current consensus config
+	// current consensus config, accessed by atomic
 	consensusConfig *ConsensusConfig
 	TuningOptions   *TuningOptions
+	FSM             FSM
+	Net             Net
+	Account         Account
 	// it only takes effects at the first time when bootstrap
 	InitConsensusConfig *InitConsensusConfig
 }
@@ -133,6 +136,15 @@ func (config *Config) Validate() (err error) {
 	case config == nil:
 		err = fmt.Errorf("config is nil")
 		return
+	case config.Account == nil:
+		err = fmt.Errorf("Account is nil")
+		return
+	case config.Net == nil:
+		err = fmt.Errorf("Net is nil")
+		return
+	case config.FSM == nil:
+		err = fmt.Errorf("FSM is nil")
+		return
 	}
 
 	return
@@ -160,11 +172,6 @@ type Account interface {
 
 // PBFT defines system
 type PBFT interface {
-	SetFSM(FSM)
-	GetFSM() FSM
-	SetNet(Net)
-	GetNet() Net
-	SetAccount(Account)
 	SetConfig(*Config)
 	GetConfig() *Config
 
@@ -291,12 +298,16 @@ func (pm *PayloadMsg) DeserializePayload() (msg Msg, err error) {
 func (pm *PayloadMsg) Deserialization(source *common.ZeroCopySource) (err error) {
 	typeU32, eof := source.NextUint32()
 	if eof {
-		err = fmt.Errorf("PayloadMsg short read")
+		err = fmt.Errorf("PayloadMsg Deserialization NextUint32 unexpected eof")
 		return
 	}
 	payload, _, irregular, eof := source.NextVarBytes()
-	if irregular || !eof {
-		err = fmt.Errorf("irregular:%v eof:%v", irregular, eof)
+	if irregular {
+		err = fmt.Errorf("PayloadMsg Deserialization NextVarBytes irregular data")
+		return
+	}
+	if eof {
+		err = fmt.Errorf("PayloadMsg Deserialization NextVarBytes unexpected eof")
 		return
 	}
 
@@ -321,17 +332,19 @@ type Signature struct {
 func (sig *Signature) Deserialization(source *common.ZeroCopySource) (err error) {
 	peerIndex, eof := source.NextUint32()
 	if eof {
-		err = fmt.Errorf("Signature Deserialization short read")
+		err = fmt.Errorf("Signature Deserialization NextUint32 unexpected eof")
 		return
 	}
 
-	sigBytes, _, irreg, _ := source.NextVarBytes()
-
-	if irreg {
-		err = fmt.Errorf("Signature Deserialization irregular data")
+	sigBytes, _, irregular, eof := source.NextVarBytes()
+	if irregular {
+		err = fmt.Errorf("Signature Deserialization NextVarBytes irregular data")
 		return
 	}
-
+	if eof {
+		err = fmt.Errorf("Signature Deserialization NextVarBytes unexpected eof")
+		return
+	}
 	sig.PeerIndex = peerIndex
 	sig.Sig = sigBytes
 	return
@@ -369,17 +382,21 @@ func (pp *PrePrepareMsg) Deserialization(source *common.ZeroCopySource) (err err
 	}
 	view, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("PrePrepareMsg Deserialization short read")
+		err = fmt.Errorf("PrePrepareMsg Deserialization unexpected eof reading view")
 		return
 	}
 	n, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("PrePrepareMsg Deserialization short read")
+		err = fmt.Errorf("PrePrepareMsg Deserialization unexpected eof reading n")
 		return
 	}
 	clientMsgDigest, _, irregular, eof := source.NextString()
 	if irregular {
-		err = fmt.Errorf("PrePrepareMsg Deserialization irregular")
+		err = fmt.Errorf("PrePrepareMsg Deserialization irregular data reading clientMsgDigest")
+		return
+	}
+	if eof {
+		err = fmt.Errorf("PrePrepareMsg Deserialization unexpected eof reading clientMsgDigest")
 		return
 	}
 
@@ -456,17 +473,17 @@ func (p *PrepareMsg) Deserialization(source *common.ZeroCopySource) (err error) 
 	}
 	view, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("PrepareMsg Deserialization short read")
+		err = fmt.Errorf("PrepareMsg Deserialization unexpected eof reading view")
 		return
 	}
 	n, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("PrepareMsg Deserialization short read")
+		err = fmt.Errorf("PrepareMsg Deserialization unexpected eof reading n")
 		return
 	}
 	clientMsgDigest, _, irregular, eof := source.NextString()
 	if irregular {
-		err = fmt.Errorf("PrepareMsg Deserialization irregular")
+		err = fmt.Errorf("PrepareMsg Deserialization irregular data reading clientMsgDigest")
 		return
 	}
 
@@ -510,17 +527,17 @@ func (c *CommitMsg) Deserialization(source *common.ZeroCopySource) (err error) {
 	}
 	view, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("CommitMsg Deserialization short read")
+		err = fmt.Errorf("CommitMsg Deserialization unexpected eof reading view")
 		return
 	}
 	n, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("CommitMsg Deserialization short read")
+		err = fmt.Errorf("CommitMsg Deserialization unexpected eof reading n")
 		return
 	}
 	clientMsgDigest, _, irregular, eof := source.NextString()
 	if irregular {
-		err = fmt.Errorf("CommitMsg Deserialization irregular")
+		err = fmt.Errorf("CommitMsg Deserialization irregular data reading clientMsgDigest")
 		return
 	}
 
@@ -548,7 +565,7 @@ type Prepared struct {
 func (pd *Prepared) Deserialization(source *common.ZeroCopySource) (err error) {
 	size, eof := source.NextUint16()
 	if eof {
-		err = fmt.Errorf("Prepared Deserialization short read")
+		err = fmt.Errorf("Prepared Deserialization unexpected eof reading size")
 		return
 	}
 
@@ -599,17 +616,17 @@ func (vc *ViewChangeMsg) Deserialization(source *common.ZeroCopySource) (err err
 	}
 	view, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		err = fmt.Errorf("ViewChangeMsg Deserialization unexpected eof reading view")
 		return
 	}
 	n, eof := source.NextUint64()
 	if eof {
-		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		err = fmt.Errorf("ViewChangeMsg Deserialization unexpected eof reading n")
 		return
 	}
 	size, eof := source.NextUint16()
 	if eof {
-		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		err = fmt.Errorf("ViewChangeMsg Deserialization unexpected eof reading size")
 		return
 	}
 	p := make([]Prepared, size)
