@@ -53,7 +53,7 @@ func (bft *pbft) GetConfig() *Config {
 
 func (bft *pbft) Start() (err error) {
 
-	// InitConsensusConfig for the first time
+	// persist InitConsensusConfig for the first time
 	initConsensusConfig := bft.config.FSM.GetInitConsensusConfig()
 	if initConsensusConfig == nil {
 		initConsensusConfig = bft.config.InitConsensusConfig
@@ -67,21 +67,26 @@ func (bft *pbft) Start() (err error) {
 		if initConsensusConfig.HighWaterMark == 0 {
 			initConsensusConfig.HighWaterMark = defaultHighWaterMark
 		}
+		bft.config.FSM.Start()
 		bft.config.FSM.InitConsensusConfig(initConsensusConfig)
 		bft.config.FSM.Commit()
-	} else {
-		// load from db
-		bft.config.InitConsensusConfig = initConsensusConfig
 	}
+	// InitConsensusConfig is never used afterwards
+	bft.config.InitConsensusConfig = nil
 
-	bft.loadConsensusConfig()
+	// load all states from FSM
 
+	// 1. refresh consensus config
+	bft.refreshConsensusConfig()
+
+	// 2. init net with history peers
 	bft.config.Net.OnUpdateConsensusPeers(bft.config.FSM.GetHistoryPeers())
 
+	// 3. init self index
 	bft.accountIndex = bft.config.FSM.GetIndexByPubkey(bft.config.Account.PublicKey())
 
+	// start to handle msg
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
-
 	util.GoFunc(&bft.wg, func() {
 		err := bft.handleMsg()
 		log.Println("handleMsg quit", err)
@@ -90,7 +95,8 @@ func (bft *pbft) Start() (err error) {
 	return
 }
 
-func (bft *pbft) loadConsensusConfig() {
+// load from state
+func (bft *pbft) refreshConsensusConfig() {
 	config := bft.config.FSM.GetConsensusConfig()
 	if config == nil {
 		log.Fatal("GetConsensusConfig returns nil")
@@ -98,6 +104,7 @@ func (bft *pbft) loadConsensusConfig() {
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&bft.config.consensusConfig)), unsafe.Pointer(config))
 }
 
+// cached version
 func (bft *pbft) getConsensusConfig() *ConsensusConfig {
 	return (*ConsensusConfig)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&bft.config.consensusConfig))))
 }
@@ -116,23 +123,24 @@ const (
 	NonConsensusIndex = uint32(math.MaxUint32)
 )
 
-func (bft *pbft) onUpdateConsensusPeers(fromPeers, toPeers []PeerInfo) {
-	if bft.accountIndex == NonConsensusIndex {
-		// get index by public key
-		pubKey := bft.config.Account.PublicKey()
-		for _, peer := range toPeers {
-			if pubKey == peer.Pubkey {
-				bft.accountIndex = peer.Index
+func (bft *pbft) onStateChanged() {
+
+	bft.refreshConsensusConfig()
+	consensusConfig := bft.getConsensusConfig()
+
+	if bft.config.FSM.IsConsensusPeersDirty() {
+		if bft.accountIndex == NonConsensusIndex {
+			// get index by public key
+			pubKey := bft.config.Account.PublicKey()
+			for _, peer := range consensusConfig.Peers {
+				if pubKey == peer.Pubkey {
+					bft.accountIndex = peer.Index
+				}
 			}
 		}
+
+		bft.config.Net.OnUpdateConsensusPeers(consensusConfig.Peers)
 	}
-
-	bft.config.Net.OnUpdateConsensusPeers(toPeers)
-
-	bft.config.consensusConfig.Peers = toPeers
-}
-
-func (bft *pbft) onUpdateView(view uint64) {
 }
 
 func (bft *pbft) handleSyncResp(ctx context.Context, msg Msg) (handled bool, err error) {
@@ -353,8 +361,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 							continue
 						}
 
-						bft.config.FSM.Exec(resp.ClientMsg)
-						bft.config.FSM.AddClientMsgAndProof(resp.ClientMsg, resp.CommitMsgs)
+						bft.config.FSM.StoreAndExec(resp.ClientMsg, resp.CommitMsgs, n)
 						break
 					}
 				}
@@ -374,8 +381,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 			}
-			bft.config.FSM.Exec(clientMsg)
-			bft.config.FSM.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
+			bft.config.FSM.StoreAndExec(clientMsg, bft.msgPool.GetCommitMsgs(msg.N), msg.N)
 
 			if msg.N == bft.config.consensusConfig.NextCheckpoint {
 				var checkPointMsg *CheckpointMsg
@@ -399,7 +405,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 				bft.config.FSM.Commit()
 			}
 
-			bft.loadConsensusConfig()
+			bft.refreshConsensusConfig()
 		}
 	} else {
 		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
@@ -426,7 +432,7 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 			bft.config.Net.Broadcast(nv)
 
 			bft.config.FSM.UpdateV(msg.NewView)
-			bft.loadConsensusConfig()
+			bft.refreshConsensusConfig()
 		}
 	} else {
 		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", consensusConfig.PrimaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
@@ -480,7 +486,7 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 		bft.config.FSM.UpdateV(msg.NewView)
 		bft.config.FSM.Commit()
 
-		bft.loadConsensusConfig()
+		bft.refreshConsensusConfig()
 
 	} else {
 		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.PrimaryOfView(msg.NewView) = %v)", msg.NewView, consensusConfig.View, msg.PeerIndex, consensusConfig.PrimaryOfView(msg.NewView))

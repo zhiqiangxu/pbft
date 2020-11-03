@@ -9,23 +9,36 @@ import (
 
 // FSM for deterministic state machine
 type FSM interface {
-	Exec(ClientMsg) (changed bool, fromPeers, toPeers []PeerInfo)
+	Start() // reset all IsXXXDirty to false
 
-	AddClientMsgAndProof(ClientMsg, []*CommitMsg) // N is implicitly saved
+	// genesis config
+	InitConsensusConfig(*InitConsensusConfig) // also updates history peers and execs optional genesis msg
+	StoreAndExec(ClientMsg, []*CommitMsg, uint64 /*N*/)
+	UpdateV(uint64)
+	UpdateNextCheckpoint(uint64)
+	UpdateCheckpointInterval(uint64)
+	UpdateHighWaterMark(uint64)
+	UpdteConsensusPeers([]PeerInfo) // also updates history peers
+
+	GetInitConsensusConfig() *InitConsensusConfig
 	GetClientMsgAndProof(n uint64) (ClientMsg, []*CommitMsg)
 	GetClientMsg(n uint64) ClientMsg
 	GetClientMsgByDigest(digest string) ClientMsg
 
-	InitConsensusConfig(*InitConsensusConfig) // also updates history peers
-	UpdteConsensusPeers([]PeerInfo)           // also updates history peers
-	GetIndexByPubkey(pk Pubkey) uint32        // returns NonConsensusIndex if not found
+	GetIndexByPubkey(pk Pubkey) uint32 // returns NonConsensusIndex if not found
 	GetConsensusConfig() *ConsensusConfig
-	GetInitConsensusConfig() *InitConsensusConfig
 	GetHistoryPeers() []PeerInfo
+
+	IsVDirty() bool
+	IsNextCheckpointDirty() bool
+	IsCheckpointIntervalDirty() bool
+	IsHighWaterMarkDirty() bool
+	IsConsensusPeersDirty() bool
+
 	GetV() (uint64, error)
 	GetNextN() (uint64, error)
-	UpdateV(v uint64)
-	UpdateNextCheckpoint(checkPoint uint64)
+	GetHighWaterMark() uint64
+	GetCheckpointInterval() uint64
 
 	Commit()
 }
@@ -67,6 +80,7 @@ type Config struct {
 	Net             Net
 	Account         Account
 	// it only takes effects at the first time when bootstrap
+	// and it's set to nil after usage
 	InitConsensusConfig *InitConsensusConfig
 }
 

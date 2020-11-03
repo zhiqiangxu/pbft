@@ -191,15 +191,51 @@ func newTestFSM() *fsm {
 	}
 }
 
-func (f *fsm) Exec(msg ClientMsg) (changed bool, fromPeers, toPeers []PeerInfo) {
-	cm := msg.(*testClientMsg)
-	f.v += cm.n
-	return
+func (f *fsm) Start() {
+
 }
 
-func (f *fsm) AddClientMsgAndProof(clientMsg ClientMsg, commits []*CommitMsg) {
-	f.clientMsgAndProof[commits[0].N] = clientMsgAndProof{clientMsg: clientMsg, commits: commits}
-	f.digest2N[clientMsg.Digest()] = commits[0].N
+func (f *fsm) GetCheckpointInterval() uint64 {
+	return f.currentConsensusConfig.CheckpointInterval
+}
+
+func (f *fsm) GetHighWaterMark() uint64 {
+	return f.currentConsensusConfig.HighWaterMark
+}
+
+func (f *fsm) UpdateHighWaterMark(uint64) {
+
+}
+
+func (f *fsm) UpdateCheckpointInterval(v uint64) {
+
+}
+
+func (f *fsm) IsVDirty() bool {
+	panic("todo")
+}
+func (f *fsm) IsNextCheckpointDirty() bool {
+	panic("todo")
+}
+func (f *fsm) IsCheckpointIntervalDirty() bool {
+	panic("todo")
+}
+func (f *fsm) IsHighWaterMarkDirty() bool {
+	panic("todo")
+}
+func (f *fsm) IsConsensusPeersDirty() bool {
+	panic("todo")
+}
+
+func (f *fsm) StoreAndExec(msg ClientMsg, commits []*CommitMsg, n uint64) {
+	if len(commits) > 0 {
+		n = commits[0].N
+	}
+	f.clientMsgAndProof[n] = clientMsgAndProof{clientMsg: msg, commits: commits}
+	f.digest2N[msg.Digest()] = n
+
+	cm := msg.(*testClientMsg)
+	f.v += cm.n
 	return
 }
 
@@ -237,7 +273,7 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 	}
 	f.initConsensusConfig = initConsensusConfig
 	if initConsensusConfig.GenesisMsg != nil {
-		f.Exec(initConsensusConfig.GenesisMsg)
+		f.StoreAndExec(initConsensusConfig.GenesisMsg, nil, initConsensusConfig.N)
 		n := initConsensusConfig.N + 1
 		f.currentConsensusConfig = &ConsensusConfig{
 			Peers:              initConsensusConfig.Peers,
