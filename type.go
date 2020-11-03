@@ -24,9 +24,10 @@ type FSM interface {
 	GetClientMsgAndProof(n uint64) (ClientMsg, []*CommitMsg)
 	GetClientMsg(n uint64) ClientMsg
 	GetClientMsgByDigest(digest string) ClientMsg
+	GetStateRoot() string
 
-	GetIndexByPubkey(pk Pubkey) uint32 // returns NonConsensusIndex if not found
-	GetConsensusConfig() *ConsensusConfig
+	GetIndexByPubkey(pk Pubkey) uint32    // returns NonConsensusIndex if not found
+	GetConsensusConfig() *ConsensusConfig // each call should return a new copy
 	GetHistoryPeers() []PeerInfo
 
 	IsVDirty() bool

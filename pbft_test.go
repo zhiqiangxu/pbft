@@ -191,6 +191,10 @@ func newTestFSM() *fsm {
 	}
 }
 
+func (f *fsm) GetStateRoot() string {
+	return ""
+}
+
 func (f *fsm) Start() {
 
 }

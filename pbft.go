@@ -141,6 +141,7 @@ func (bft *pbft) onStateChanged() {
 
 		bft.config.Net.OnUpdateConsensusPeers(consensusConfig.Peers)
 	}
+
 }
 
 func (bft *pbft) handleSyncResp(ctx context.Context, msg Msg) (handled bool, err error) {
@@ -361,7 +362,11 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 							continue
 						}
 
+						bft.config.FSM.Start()
 						bft.config.FSM.StoreAndExec(resp.ClientMsg, resp.CommitMsgs, n)
+						bft.config.FSM.Commit()
+						bft.onStateChanged()
+						consensusConfig = bft.getConsensusConfig()
 						break
 					}
 				}
@@ -381,12 +386,13 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 			}
+			bft.config.FSM.Start()
 			bft.config.FSM.StoreAndExec(clientMsg, bft.msgPool.GetCommitMsgs(msg.N), msg.N)
 
-			if msg.N == bft.config.consensusConfig.NextCheckpoint {
+			if msg.N == consensusConfig.NextCheckpoint {
 				var checkPointMsg *CheckpointMsg
 				for {
-					checkPointMsg, err = bft.constructCheckpointMsg()
+					checkPointMsg, err = bft.constructCheckpointMsg(bft.config.FSM.GetStateRoot(), msg.N)
 					if err != nil {
 						log.Println("constructCheckpointMsg err", err)
 						time.Sleep(time.Second)
@@ -395,17 +401,18 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 				if added, checkpointed := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
-					nextCheckpoint := bft.config.consensusConfig.NextCheckpoint + consensusConfig.CheckpointInterval
-					bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
 					bft.msgPool.Sealed(msg.N)
 				}
+
+				nextCheckpoint := bft.config.consensusConfig.NextCheckpoint + consensusConfig.CheckpointInterval
+				bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
 				bft.config.FSM.Commit()
+				bft.onStateChanged()
 				bft.config.Net.Broadcast(checkPointMsg)
 			} else {
 				bft.config.FSM.Commit()
+				bft.onStateChanged()
 			}
-
-			bft.refreshConsensusConfig()
 		}
 	} else {
 		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
@@ -413,7 +420,12 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 	return
 }
 
-func (bft *pbft) constructCheckpointMsg() (checkpointMsg *CheckpointMsg, err error) {
+func (bft *pbft) constructCheckpointMsg(stateRoot string, n uint64) (checkpointMsg *CheckpointMsg, err error) {
+	checkpointMsg = &CheckpointMsg{N: n, StateRoot: stateRoot, Signature: Signature{PeerIndex: bft.accountIndex}}
+
+	digest := checkpointMsg.SignatureDigest()
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
+	checkpointMsg.Signature.Sig = sig
 	return
 }
 
@@ -431,8 +443,10 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 			bft.msgPool.AddNewViewMsg(nv)
 			bft.config.Net.Broadcast(nv)
 
+			bft.config.FSM.Start()
 			bft.config.FSM.UpdateV(msg.NewView)
-			bft.refreshConsensusConfig()
+			bft.config.FSM.Commit()
+			bft.onStateChanged()
 		}
 	} else {
 		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", consensusConfig.PrimaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
@@ -483,10 +497,10 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 			bft.msgPool.AddPrepareMsg(p)
 			bft.config.Net.Broadcast(p)
 		}
+		bft.config.FSM.Start()
 		bft.config.FSM.UpdateV(msg.NewView)
 		bft.config.FSM.Commit()
-
-		bft.refreshConsensusConfig()
+		bft.onStateChanged()
 
 	} else {
 		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.PrimaryOfView(msg.NewView) = %v)", msg.NewView, consensusConfig.View, msg.PeerIndex, consensusConfig.PrimaryOfView(msg.NewView))
@@ -499,10 +513,12 @@ func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
 	if added, checkpointed := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
 		consensusConfig := bft.getConsensusConfig()
 		nextCheckpoint := msg.N + consensusConfig.CheckpointInterval
+
+		bft.config.FSM.Start()
 		bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
-		bft.config.FSM.Commit()
-		bft.config.consensusConfig.NextCheckpoint = nextCheckpoint
 		bft.msgPool.Sealed(msg.N)
+		bft.config.FSM.Commit()
+		bft.onStateChanged()
 	}
 	return
 }
