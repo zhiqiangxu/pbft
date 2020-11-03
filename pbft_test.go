@@ -11,6 +11,7 @@ import (
 )
 
 func TestPBft(t *testing.T) {
+
 	// test with a simple fsm that only does ADD op
 
 	account1 := RandAccount("")
@@ -236,11 +237,12 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 	f.initConsensusConfig = initConsensusConfig
 	if initConsensusConfig.GenesisMsg != nil {
 		f.Exec(initConsensusConfig.GenesisMsg)
-		n := initConsensusConfig.N
+		n := initConsensusConfig.N + 1
 		f.currentConsensusConfig = &ConsensusConfig{
 			Peers:              initConsensusConfig.Peers,
 			View:               initConsensusConfig.View,
-			N:                  &n,
+			NextN:              n,
+			NextCheckpoint:     n + initConsensusConfig.CheckpointInterval - 1,
 			CheckpointInterval: initConsensusConfig.CheckpointInterval,
 			HighWaterMark:      initConsensusConfig.HighWaterMark,
 		}
@@ -248,6 +250,8 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 		f.currentConsensusConfig = &ConsensusConfig{
 			Peers:              initConsensusConfig.Peers,
 			View:               initConsensusConfig.View,
+			NextN:              initConsensusConfig.N,
+			NextCheckpoint:     initConsensusConfig.N + initConsensusConfig.CheckpointInterval - 1,
 			CheckpointInterval: initConsensusConfig.CheckpointInterval,
 			HighWaterMark:      initConsensusConfig.HighWaterMark,
 		}
@@ -298,16 +302,12 @@ func (f *fsm) GetV() (v uint64, err error) {
 	return
 }
 
-func (f *fsm) GetN() (n uint64, err error) {
+func (f *fsm) GetNextN() (n uint64, err error) {
 	if f.currentConsensusConfig == nil {
 		err = fmt.Errorf("init not called")
 		return
 	}
-	if f.currentConsensusConfig.N == nil {
-		err = fmt.Errorf("no msg saved")
-		return
-	}
-	n = *f.currentConsensusConfig.N
+	n = f.currentConsensusConfig.NextN
 	return
 }
 
@@ -315,8 +315,8 @@ func (f *fsm) UpdateV(v uint64) {
 	f.currentConsensusConfig.View = v
 }
 
-func (f *fsm) UpdateLastCheckpoint(checkPoint uint64) {
-	f.currentConsensusConfig.LastCheckpoint = &checkPoint
+func (f *fsm) UpdateNextCheckpoint(checkPoint uint64) {
+	f.currentConsensusConfig.NextCheckpoint = checkPoint
 }
 
 func (f *fsm) Commit() {

@@ -23,9 +23,9 @@ type FSM interface {
 	GetInitConsensusConfig() *InitConsensusConfig
 	GetHistoryPeers() []PeerInfo
 	GetV() (uint64, error)
-	GetN() (uint64, error)
+	GetNextN() (uint64, error)
 	UpdateV(v uint64)
-	UpdateLastCheckpoint(checkPoint uint64)
+	UpdateNextCheckpoint(checkPoint uint64)
 
 	Commit()
 }
@@ -60,11 +60,11 @@ type PeerInfo struct {
 
 // Config for pbft
 type Config struct {
-	TuningOptions *TuningOptions
-	// it only takes effects at the first time when bootstrap
-	InitConsensusConfig *InitConsensusConfig
 	// current consensus config
 	consensusConfig *ConsensusConfig
+	TuningOptions   *TuningOptions
+	// it only takes effects at the first time when bootstrap
+	InitConsensusConfig *InitConsensusConfig
 }
 
 // NewClientMsgFunc is shared by all other parts
@@ -106,10 +106,20 @@ func (iconfig *InitConsensusConfig) Validate() (err error) {
 type ConsensusConfig struct {
 	Peers              []PeerInfo
 	View               uint64
-	N                  *uint64
+	NextN              uint64
 	CheckpointInterval uint64
 	HighWaterMark      uint64
-	LastCheckpoint     *uint64
+	NextCheckpoint     uint64
+}
+
+// Primary index
+func (cconfig *ConsensusConfig) Primary() uint32 {
+	return cconfig.PrimaryOfView(cconfig.View)
+}
+
+// PrimaryOfView for primary of specified view
+func (cconfig *ConsensusConfig) PrimaryOfView(v uint64) uint32 {
+	return cconfig.Peers[v%uint64(len(cconfig.Peers))].Index
 }
 
 const (
@@ -137,7 +147,6 @@ var defaultTuningOptions = &TuningOptions{MsgCSize: 100}
 
 // Net for network related stuff
 type Net interface {
-	SetPBFT(PBFT)
 	Broadcast(msg Msg)
 	SendTo(peerIndex uint32, msg Msg)
 	OnUpdateConsensusPeers([]PeerInfo)
@@ -167,6 +176,37 @@ type PBFT interface {
 
 // MessageType for pbft
 type MessageType uint32
+
+func (mt MessageType) String() string {
+	switch mt {
+	case MessageTypeClient:
+		return "MessageTypeClient"
+	case MessageTypePrePrepare:
+		return "MessageTypePrePrepare"
+	case MessageTypePrePreparePiggybacked:
+		return "MessageTypePrePreparePiggybacked"
+	case MessageTypePrepare:
+		return "MessageTypePrepare"
+	case MessageTypeCommit:
+		return "MessageTypeCommit"
+	case MessageTypeViewChange:
+		return "MessageTypeViewChange"
+	case MessageTypeNewView:
+		return "MessageTypeNewView"
+	case MessageTypeCheckpoint:
+		return "MessageTypeCheckpoint"
+	case MessageTypeSyncClientMessageReq:
+		return "MessageTypeSyncClientMessageReq"
+	case MessageTypeSyncSealedClientMessageReq:
+		return "MessageTypeSyncSealedClientMessageReq"
+	case MessageTypeSyncClientMessageResp:
+		return "MessageTypeSyncClientMessageResp"
+	case MessageTypeSyncSealedClientMessageResp:
+		return "MessageTypeSyncSealedClientMessageResp"
+	default:
+		panic(fmt.Sprintf("unkown message type:%d", mt))
+	}
+}
 
 const (
 	// MessageTypeClient for client msg

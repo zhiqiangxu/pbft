@@ -8,18 +8,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"github.com/petermattis/goid"
 	"github.com/zhiqiangxu/util"
 )
 
 type pbft struct {
-	// accessed by atomic
-	view  uint64 // current view
-	nextn uint64 // next n to seal
-
+	config       *Config
 	fsm          FSM
 	net          Net
-	config       *Config
 	account      Account
 	accountIndex uint32
 	msgC         chan Msg
@@ -92,11 +90,7 @@ func (bft *pbft) Start() (err error) {
 		return
 	}
 
-	if bft.net == nil {
-		bft.net = defaultNet()
-	}
-	bft.net.SetPBFT(bft)
-
+	// InitConsensusConfig for the first time
 	initConsensusConfig := bft.fsm.GetInitConsensusConfig()
 	if initConsensusConfig == nil {
 		initConsensusConfig = bft.config.InitConsensusConfig
@@ -117,13 +111,14 @@ func (bft *pbft) Start() (err error) {
 		bft.config.InitConsensusConfig = initConsensusConfig
 	}
 
-	bft.config.consensusConfig = bft.fsm.GetConsensusConfig()
-	bft.view = bft.config.consensusConfig.View
-	if bft.config.consensusConfig.N != nil {
-		bft.nextn = *bft.config.consensusConfig.N + 1
-	} else {
-		bft.nextn = bft.config.InitConsensusConfig.N
+	bft.loadConsensusConfig()
+
+	if bft.net == nil {
+		bft.net = defaultNet()
 	}
+
+	bft.net.OnUpdateConsensusPeers(bft.fsm.GetHistoryPeers())
+
 	bft.accountIndex = bft.fsm.GetIndexByPubkey(bft.account.PublicKey())
 
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
@@ -134,6 +129,18 @@ func (bft *pbft) Start() (err error) {
 	})
 
 	return
+}
+
+func (bft *pbft) loadConsensusConfig() {
+	config := bft.fsm.GetConsensusConfig()
+	if config == nil {
+		log.Fatal("GetConsensusConfig returns nil")
+	}
+	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&bft.config.consensusConfig)), unsafe.Pointer(config))
+}
+
+func (bft *pbft) getConsensusConfig() *ConsensusConfig {
+	return (*ConsensusConfig)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&bft.config.consensusConfig))))
 }
 
 func (bft *pbft) Stop() (err error) {
@@ -203,6 +210,7 @@ func (bft *pbft) handleMsg() (err error) {
 	for {
 		select {
 		case msg := <-bft.msgC:
+			log.Println(goid.Get(), "got msg", msg.Type())
 			switch msg.Type() {
 			case MessageTypeClient:
 				err = bft.handleClientMsg(msg.(ClientMsg))
@@ -236,18 +244,6 @@ func (bft *pbft) handleMsg() (err error) {
 	}
 }
 
-func (bft *pbft) isPrimary() bool {
-	return bft.accountIndex == bft.primary()
-}
-
-func (bft *pbft) primary() uint32 {
-	return bft.primaryOfView(atomic.LoadUint64(&bft.view))
-}
-
-func (bft *pbft) primaryOfView(v uint64) uint32 {
-	return bft.config.consensusConfig.Peers[v%uint64(len(bft.config.consensusConfig.Peers))].Index
-}
-
 func (bft *pbft) validateClientMsg(msg ClientMsg) (err error) {
 	digest := msg.Digest()
 	cm := bft.msgPool.GetClientMsgByDigest(digest)
@@ -266,11 +262,8 @@ func (bft *pbft) validateClientMsg(msg ClientMsg) (err error) {
 }
 
 func (bft *pbft) highestNAllowed() (highestN uint64) {
-	if bft.config.consensusConfig.LastCheckpoint != nil {
-		highestN = *bft.config.consensusConfig.LastCheckpoint + bft.config.consensusConfig.CheckpointInterval + bft.config.consensusConfig.HighWaterMark
-	} else {
-		highestN = bft.config.InitConsensusConfig.N + bft.config.consensusConfig.CheckpointInterval - 1 + bft.config.consensusConfig.HighWaterMark
-	}
+	consensusConfig := bft.getConsensusConfig()
+	highestN = consensusConfig.NextCheckpoint + consensusConfig.HighWaterMark
 	return
 }
 
@@ -281,28 +274,30 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 		return
 	}
 
-	primary := bft.primary()
+	consensusConfig := bft.getConsensusConfig()
+	primary := consensusConfig.Primary()
 	if bft.accountIndex != primary {
 		bft.net.SendTo(primary, msg)
 		return
 	}
 
 	var nextHighest uint64
-	highest, exists := bft.msgPool.HighestN()
-	if exists {
-		nextHighest = highest + 1
-	} else {
-		nextHighest = bft.nextn
+	{
+		highest, exists := bft.msgPool.HighestN()
+		if exists {
+			nextHighest = highest + 1
+		} else {
+			nextHighest = consensusConfig.NextN
+		}
 	}
 
 	highestN := bft.highestNAllowed()
-
 	if nextHighest > highestN {
 		err = fmt.Errorf("high water mark exceeded:%v", highestN)
 		return
 	}
 
-	ppp, err := bft.constructPrePreparePiggybackedMsg(bft.view, nextHighest, msg)
+	ppp, err := bft.constructPrePreparePiggybackedMsg(consensusConfig.View, nextHighest, msg)
 	if err != nil {
 		return
 	}
@@ -324,8 +319,9 @@ func (bft *pbft) constructPrePreparePiggybackedMsg(v, n uint64, msg ClientMsg) (
 }
 
 func (bft *pbft) handlePrePreparePiggybackedMsg(msg *PrePreparePiggybackedMsg) (err error) {
+	consensusConfig := bft.getConsensusConfig()
 
-	if msg.View == bft.view && msg.PeerIndex == bft.primary() {
+	if msg.View == consensusConfig.View && msg.PeerIndex == consensusConfig.Primary() {
 		var p *PrepareMsg
 		p, err = bft.constructPrepareMsg(&msg.PrePrepareMsg)
 		if err != nil {
@@ -335,7 +331,7 @@ func (bft *pbft) handlePrePreparePiggybackedMsg(msg *PrePreparePiggybackedMsg) (
 		bft.msgPool.AddPrepareMsg(p)
 		bft.net.Broadcast(p)
 	} else {
-		err = fmt.Errorf("invalid PrePreparePiggybackedMsg(msg.View = %v, bft.view = %v, msg.PeerIndex = %v, bft.primary = %v)", msg.View, bft.view, msg.PeerIndex, bft.primary())
+		err = fmt.Errorf("invalid PrePreparePiggybackedMsg(msg.View = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.Primary = %v)", msg.View, consensusConfig.View, msg.PeerIndex, consensusConfig.Primary())
 	}
 	return
 }
@@ -351,7 +347,11 @@ func (bft *pbft) constructPrepareMsg(msg *PrePrepareMsg) (p *PrepareMsg, err err
 }
 
 func (bft *pbft) handlePrepareMsg(msg *PrepareMsg) (err error) {
-	if msg.View == bft.view {
+	log.Println(goid.Get(), "handlePrepareMsg")
+
+	consensusConfig := bft.getConsensusConfig()
+
+	if msg.View == consensusConfig.View {
 		if added, prepared := bft.msgPool.AddPrepareMsg(msg); added && prepared {
 			var c *CommitMsg
 			c, err = bft.constructCommitMsg(msg)
@@ -362,7 +362,7 @@ func (bft *pbft) handlePrepareMsg(msg *PrepareMsg) (err error) {
 			bft.net.Broadcast(c)
 		}
 	} else {
-		err = fmt.Errorf("invalid PrepareMsg(msg.View = %v, bft.view = %v)", msg.View, bft.view)
+		err = fmt.Errorf("invalid PrepareMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
 	}
 	return
 }
@@ -378,11 +378,13 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 }
 
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
-	if msg.View == bft.view && msg.N >= bft.nextn {
+	consensusConfig := bft.getConsensusConfig()
+
+	if msg.View == consensusConfig.View && msg.N >= consensusConfig.NextN {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
 			// handle previous ones
-			if msg.N > bft.nextn {
-				for n := bft.nextn; n < msg.N; n++ {
+			if msg.N > consensusConfig.NextN {
+				for n := consensusConfig.NextN; n < msg.N; n++ {
 					var resp *SyncSealedClientMessageResp
 					for {
 						resp, err = bft.msgSyncer.SyncSealedClientMsg(context.Background(), n)
@@ -416,7 +418,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 			bft.fsm.Exec(clientMsg)
 			bft.fsm.AddClientMsgAndProof(clientMsg, bft.msgPool.GetCommitMsgs(msg.N))
 
-			if bft.nextn%bft.config.consensusConfig.CheckpointInterval == 0 {
+			if msg.N == bft.config.consensusConfig.NextCheckpoint {
 				var checkPointMsg *CheckpointMsg
 				for {
 					checkPointMsg, err = bft.constructCheckpointMsg()
@@ -428,9 +430,8 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 				if added, checkpointed := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
-					lastCheckpoint := checkPointMsg.N
-					bft.config.consensusConfig.LastCheckpoint = &lastCheckpoint
-					bft.fsm.UpdateLastCheckpoint(lastCheckpoint)
+					nextCheckpoint := bft.config.consensusConfig.NextCheckpoint + consensusConfig.CheckpointInterval
+					bft.fsm.UpdateNextCheckpoint(nextCheckpoint)
 					bft.msgPool.Sealed(msg.N)
 				}
 				bft.fsm.Commit()
@@ -439,10 +440,10 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 				bft.fsm.Commit()
 			}
 
-			atomic.AddUint64(&bft.nextn, msg.N+1)
+			bft.loadConsensusConfig()
 		}
 	} else {
-		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, bft.view = %v)", msg.View, bft.view)
+		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
 	}
 	return
 }
@@ -452,7 +453,9 @@ func (bft *pbft) constructCheckpointMsg() (checkpointMsg *CheckpointMsg, err err
 }
 
 func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
-	if msg.NewView > bft.view && bft.primaryOfView(msg.NewView) == bft.accountIndex {
+	consensusConfig := bft.getConsensusConfig()
+
+	if msg.NewView > consensusConfig.View && consensusConfig.PrimaryOfView(msg.NewView) == bft.accountIndex {
 		if added, enough := bft.msgPool.AddViewChangeMsg(msg); added && enough {
 			var nv *NewViewMsg
 			v, o := bft.msgPool.GetVO(msg.NewView)
@@ -463,10 +466,11 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 			bft.msgPool.AddNewViewMsg(nv)
 			bft.net.Broadcast(nv)
 
-			atomic.StoreUint64(&bft.view, msg.NewView)
+			bft.fsm.UpdateV(msg.NewView)
+			bft.loadConsensusConfig()
 		}
 	} else {
-		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", bft.primaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
+		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", consensusConfig.PrimaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
 	}
 	return
 }
@@ -500,7 +504,9 @@ func (bft *pbft) constructSyncSealedClientMsgReq(n uint64) (msg *SyncSealedClien
 }
 
 func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
-	if msg.NewView > bft.view && msg.PeerIndex == bft.primaryOfView(msg.NewView) {
+	consensusConfig := bft.getConsensusConfig()
+
+	if msg.NewView > consensusConfig.View && msg.PeerIndex == consensusConfig.PrimaryOfView(msg.NewView) {
 
 		for _, pp := range msg.O {
 			var p *PrepareMsg
@@ -515,10 +521,10 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 		bft.fsm.UpdateV(msg.NewView)
 		bft.fsm.Commit()
 
-		atomic.StoreUint64(&bft.view, msg.NewView)
+		bft.loadConsensusConfig()
 
 	} else {
-		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, bft.view = %v, msg.PeerIndex = %v, bft.primaryOfView(msg.NewView) = %v)", msg.NewView, bft.view, msg.PeerIndex, bft.primaryOfView(msg.NewView))
+		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.PrimaryOfView(msg.NewView) = %v)", msg.NewView, consensusConfig.View, msg.PeerIndex, consensusConfig.PrimaryOfView(msg.NewView))
 	}
 
 	return
@@ -526,18 +532,21 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 
 func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
 	if added, checkpointed := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
-		lastCheckpoint := msg.N
-		bft.fsm.UpdateLastCheckpoint(lastCheckpoint)
+		consensusConfig := bft.getConsensusConfig()
+		nextCheckpoint := msg.N + consensusConfig.CheckpointInterval
+		bft.fsm.UpdateNextCheckpoint(nextCheckpoint)
 		bft.fsm.Commit()
-		bft.config.consensusConfig.LastCheckpoint = &lastCheckpoint
+		bft.config.consensusConfig.NextCheckpoint = nextCheckpoint
 		bft.msgPool.Sealed(msg.N)
 	}
 	return
 }
 
 func (bft *pbft) handleSyncClientMessageReq(msg *SyncClientMessageReq) (err error) {
+	consensusConfig := bft.getConsensusConfig()
+
 	var clientMsg ClientMsg
-	if bft.nextn <= msg.N {
+	if consensusConfig.NextN <= msg.N {
 		clientMsg = bft.msgPool.GetClientMsg(msg.N)
 	} else {
 		clientMsg = bft.fsm.GetClientMsg(msg.N)
