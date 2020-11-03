@@ -52,9 +52,10 @@ func TestPBft(t *testing.T) {
 		net.index2netidx = index2netidx
 	}
 
+	NewClientMsgFunc = newClientMsg
 	for i, account := range accounts {
 		bfts[i].SetAccount(account)
-		bfts[i].SetConfig(&Config{NewClientMsgFunc: newClientMsg, InitConsensusConfig: &InitConsensusConfig{
+		bfts[i].SetConfig(&Config{InitConsensusConfig: &InitConsensusConfig{
 			Peers: []PeerInfo{
 				{Index: index1, Pubkey: account1.PublicKey()},
 				{Index: index2, Pubkey: account2.PublicKey()},
@@ -75,18 +76,22 @@ func TestPBft(t *testing.T) {
 		defer bft.Stop()
 	}
 
-	err := bft1.Send(context.Background(), &testClientMsg{n: 10})
-	if err != nil {
-		t.Fatalf("Send failed:%v", err)
-	}
+	{
+		// test happy path
+		err := bft1.Send(context.Background(), &testClientMsg{n: 10})
+		if err != nil {
+			t.Fatalf("Send failed:%v", err)
+		}
 
-	time.Sleep(time.Second)
+		time.Sleep(time.Second)
 
-	for _, fsm := range fsms {
-		if fsm.v != 10 {
-			t.Fatalf("fsm.v wrong:%v", fsm.v)
+		for _, fsm := range fsms {
+			if fsm.v != 10 {
+				t.Fatalf("fsm.v wrong:%v", fsm.v)
+			}
 		}
 	}
+
 }
 
 type testClientMsg struct {
@@ -106,11 +111,7 @@ func (msg *testClientMsg) Serialization(sink *common.ZeroCopySink) {
 }
 
 func (msg *testClientMsg) Deserialization(source *common.ZeroCopySource) (err error) {
-	n, eof := source.NextInt64()
-	if !eof {
-		err = fmt.Errorf("size wrong")
-		return
-	}
+	n, _ := source.NextInt64()
 
 	msg.n = n
 	return
@@ -140,13 +141,13 @@ func (net *testNet) Broadcast(msg Msg) {
 }
 
 func (net *testNet) onPayload(payloadMsg *PayloadMsg) {
-	msg, err := payloadMsg.DeserializePayload(net.bft.GetConfig().NewClientMsgFunc)
+	msg, err := payloadMsg.DeserializePayload()
 	if err != nil {
-		log.Fatal("DeserializePayload fail", err)
+		log.Fatalf("DeserializePayload fail:%v", err)
 	}
 	err = net.bft.Send(context.Background(), msg)
 	if err != nil {
-		log.Fatal("Send fail", err)
+		log.Fatalf("Send fail:%v", err)
 	}
 }
 

@@ -60,13 +60,15 @@ type PeerInfo struct {
 
 // Config for pbft
 type Config struct {
-	NewClientMsgFunc func() ClientMsg
-	TuningOptions    *TuningOptions
+	TuningOptions *TuningOptions
 	// it only takes effects at the first time when bootstrap
 	InitConsensusConfig *InitConsensusConfig
 	// current consensus config
 	consensusConfig *ConsensusConfig
 }
+
+// NewClientMsgFunc is shared by all other parts
+var NewClientMsgFunc func() ClientMsg
 
 // InitConsensusConfig should never change since day 1
 type InitConsensusConfig struct {
@@ -120,9 +122,6 @@ func (config *Config) Validate() (err error) {
 	switch {
 	case config == nil:
 		err = fmt.Errorf("config is nil")
-		return
-	case config.NewClientMsgFunc == nil:
-		err = fmt.Errorf("NewClientMsgFunc empty")
 		return
 	}
 
@@ -204,11 +203,11 @@ type PayloadMsg struct {
 }
 
 // DeserializePayload ...
-func (pm *PayloadMsg) DeserializePayload(newClientMsgFunc func() ClientMsg) (msg Msg, err error) {
+func (pm *PayloadMsg) DeserializePayload() (msg Msg, err error) {
 
 	switch pm.Type {
 	case MessageTypeClient:
-		msg = newClientMsgFunc()
+		msg = NewClientMsgFunc()
 	case MessageTypePrePrepare:
 		msg = &PrePrepareMsg{}
 	case MessageTypePrePreparePiggybacked:
@@ -240,6 +239,10 @@ func (pm *PayloadMsg) DeserializePayload(newClientMsgFunc func() ClientMsg) (msg
 	err = msg.Deserialization(source)
 	if err != nil {
 		return
+	}
+
+	if source.Len() != 0 {
+		err = fmt.Errorf("bytes left in PayloadMsg")
 	}
 	return
 }
@@ -319,13 +322,39 @@ func (pp *PrePrepareMsg) SignatureDigest() string {
 }
 
 // Deserialization a PrePrepareMsg
-func (pp *PrePrepareMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (pp *PrePrepareMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = pp.Signature.Deserialization(source)
+	if err != nil {
+		return
+	}
+	view, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("PrePrepareMsg Deserialization short read")
+		return
+	}
+	n, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("PrePrepareMsg Deserialization short read")
+		return
+	}
+	clientMsgDigest, _, irregular, eof := source.NextString()
+	if irregular {
+		err = fmt.Errorf("PrePrepareMsg Deserialization irregular")
+		return
+	}
+
+	pp.View = view
+	pp.N = n
+	pp.ClientMsgDigest = clientMsgDigest
+	return
 }
 
 // Serialization a PrePrepareMsg
 func (pp *PrePrepareMsg) Serialization(sink *common.ZeroCopySink) {
-
+	pp.Signature.Serialization(sink)
+	sink.WriteUint64(pp.View)
+	sink.WriteUint64(pp.N)
+	sink.WriteString(pp.ClientMsgDigest)
 }
 
 // PrePreparePiggybackedMsg ...
@@ -345,13 +374,20 @@ func (ppp *PrePreparePiggybackedMsg) SignatureDigest() string {
 }
 
 // Deserialization a PrePreparePiggybackedMsg
-func (ppp *PrePreparePiggybackedMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (ppp *PrePreparePiggybackedMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = ppp.PrePrepareMsg.Deserialization(source)
+	if err != nil {
+		return
+	}
+	ppp.ClientMsg = NewClientMsgFunc()
+	err = ppp.ClientMsg.Deserialization(source)
+	return
 }
 
 // Serialization a PrePreparePiggybackedMsg
 func (ppp *PrePreparePiggybackedMsg) Serialization(sink *common.ZeroCopySink) {
-
+	ppp.PrePrepareMsg.Serialization(sink)
+	ppp.ClientMsg.Serialization(sink)
 }
 
 // PrepareMsg ...
@@ -373,13 +409,39 @@ func (p *PrepareMsg) SignatureDigest() string {
 }
 
 // Deserialization a PrepareMsg
-func (p *PrepareMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (p *PrepareMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = p.Signature.Deserialization(source)
+	if err != nil {
+		return
+	}
+	view, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("PrepareMsg Deserialization short read")
+		return
+	}
+	n, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("PrepareMsg Deserialization short read")
+		return
+	}
+	clientMsgDigest, _, irregular, eof := source.NextString()
+	if irregular {
+		err = fmt.Errorf("PrepareMsg Deserialization irregular")
+		return
+	}
+
+	p.View = view
+	p.N = n
+	p.ClientMsgDigest = clientMsgDigest
+	return
 }
 
 // Serialization a PrepareMsg
 func (p *PrepareMsg) Serialization(sink *common.ZeroCopySink) {
-
+	p.Signature.Serialization(sink)
+	sink.WriteUint64(p.View)
+	sink.WriteUint64(p.N)
+	sink.WriteString(p.ClientMsgDigest)
 }
 
 // CommitMsg ...
@@ -401,19 +463,74 @@ func (c *CommitMsg) SignatureDigest() string {
 }
 
 // Deserialization a CommitMsg
-func (c *CommitMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (c *CommitMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = c.Signature.Deserialization(source)
+	if err != nil {
+		return
+	}
+	view, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("CommitMsg Deserialization short read")
+		return
+	}
+	n, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("CommitMsg Deserialization short read")
+		return
+	}
+	clientMsgDigest, _, irregular, eof := source.NextString()
+	if irregular {
+		err = fmt.Errorf("CommitMsg Deserialization irregular")
+		return
+	}
+
+	c.View = view
+	c.N = n
+	c.ClientMsgDigest = clientMsgDigest
+	return
 }
 
 // Serialization a CommitMsg
 func (c *CommitMsg) Serialization(sink *common.ZeroCopySink) {
-
+	c.Signature.Serialization(sink)
+	sink.WriteUint64(c.View)
+	sink.WriteUint64(c.N)
+	sink.WriteString(c.ClientMsgDigest)
 }
 
 // Prepared ...
 type Prepared struct {
 	PrepareMsgs   []PrepareMsg
 	PrePrepareMsg PrePrepareMsg
+}
+
+// Deserialization a Prepared
+func (pd *Prepared) Deserialization(source *common.ZeroCopySource) (err error) {
+	size, eof := source.NextUint16()
+	if eof {
+		err = fmt.Errorf("Prepared Deserialization short read")
+		return
+	}
+
+	pd.PrepareMsgs = make([]PrepareMsg, size)
+	for i := uint16(0); i < size; i++ {
+		err = pd.PrepareMsgs[i].Deserialization(source)
+		if err != nil {
+			return
+		}
+	}
+
+	err = pd.PrePrepareMsg.Deserialization(source)
+	return
+}
+
+// Serialization a Prepared
+func (pd *Prepared) Serialization(sink *common.ZeroCopySink) {
+	sink.WriteUint16(uint16(len(pd.PrepareMsgs)))
+	for _, pm := range pd.PrepareMsgs {
+		pm.Serialization(sink)
+	}
+	pd.PrePrepareMsg.Serialization(sink)
 }
 
 // ViewChangeMsg ...
@@ -435,13 +552,49 @@ func (vc *ViewChangeMsg) SignatureDigest() string {
 }
 
 // Deserialization a ViewChangeMsg
-func (vc *ViewChangeMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (vc *ViewChangeMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = vc.Signature.Deserialization(source)
+	if err != nil {
+		return
+	}
+	view, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		return
+	}
+	n, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		return
+	}
+	size, eof := source.NextUint16()
+	if eof {
+		err = fmt.Errorf("ViewChangeMsg Deserialization short read")
+		return
+	}
+	p := make([]Prepared, size)
+	for i := uint16(0); i < size; i++ {
+		err = p[i].Deserialization(source)
+		if err != nil {
+			return
+		}
+	}
+
+	vc.NewView = view
+	vc.N = n
+	vc.P = p
+	return
 }
 
 // Serialization a ViewChangeMsg
 func (vc *ViewChangeMsg) Serialization(sink *common.ZeroCopySink) {
-
+	vc.Signature.Serialization(sink)
+	sink.WriteUint64(vc.NewView)
+	sink.WriteUint64(vc.N)
+	sink.WriteUint16(uint16(len(vc.P)))
+	for i := 0; i < len(vc.P); i++ {
+		vc.P[i].Serialization(sink)
+	}
 }
 
 // NewViewMsg ...
