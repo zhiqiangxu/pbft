@@ -432,13 +432,34 @@ func (bft *pbft) constructCheckpointMsg(stateRoot string, n uint64) (checkpointM
 	return
 }
 
+func (bft *pbft) constructViewChangeMsg(newView uint64, prepared []Prepared) (vc *ViewChangeMsg, err error) {
+	vc = &ViewChangeMsg{NewView: newView, P: prepared, Signature: Signature{PeerIndex: bft.accountIndex}}
+
+	digest := vc.SignatureDigest()
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
+	vc.Signature.Sig = sig
+	return
+}
+
 func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 
 	if msg.NewView > consensusConfig.View && consensusConfig.PrimaryOfView(msg.NewView) == bft.accountIndex {
 		if added, enough := bft.msgPool.AddViewChangeMsg(msg); added && enough {
-			var nv *NewViewMsg
 			v, o := bft.msgPool.GetVO(msg.NewView)
+			var selfVC *ViewChangeMsg
+			for {
+				selfVC, err = bft.constructViewChangeMsg(msg.NewView, bft.msgPool.GetPrepared())
+				if err != nil {
+					log.Println("constructViewChangeMsg err", err)
+					time.Sleep(time.Second)
+					continue
+				}
+				v = append(v, selfVC)
+				break
+			}
+
+			var nv *NewViewMsg
 			nv, err = bft.constructNewViewMsg(msg.NewView, v, o)
 			if err != nil {
 				return
@@ -550,4 +571,10 @@ func (bft *pbft) handleSyncSealedClientMessageReq(msg *SyncSealedClientMessageRe
 
 	bft.config.Net.SendTo(msg.PeerIndex, &SyncSealedClientMessageResp{ReqID: msg.ReqID, ClientMsg: clientMsg, CommitMsgs: commitMsgs})
 	return
+}
+
+func (bft *pbft) quorum() int {
+	consensusConfig := bft.getConsensusConfig()
+	n := len(consensusConfig.Peers)
+	return n - (n-1)/3
 }

@@ -13,7 +13,7 @@ type FSM interface {
 
 	// genesis config
 	InitConsensusConfig(*InitConsensusConfig) // also updates history peers and execs optional genesis msg
-	StoreAndExec(ClientMsg, []*CommitMsg, uint64 /*N*/)
+	StoreAndExec(ClientMsg, map[uint32]*CommitMsg, uint64 /*N*/)
 	UpdateV(uint64)
 	UpdateNextCheckpoint(uint64)
 	UpdateCheckpointInterval(uint64)
@@ -21,7 +21,7 @@ type FSM interface {
 	UpdteConsensusPeers([]PeerInfo) // also updates history peers
 
 	GetInitConsensusConfig() *InitConsensusConfig
-	GetClientMsgAndProof(n uint64) (ClientMsg, []*CommitMsg)
+	GetClientMsgAndProof(n uint64) (ClientMsg, map[uint32]*CommitMsg)
 	GetClientMsg(n uint64) ClientMsg
 	GetClientMsgByDigest(digest string) ClientMsg
 	GetStateRoot() string
@@ -809,7 +809,7 @@ func (sync *SyncSealedClientMessageReq) Serialization(sink *common.ZeroCopySink)
 type SyncSealedClientMessageResp struct {
 	ReqID uint64
 	ClientMsg
-	CommitMsgs []*CommitMsg
+	CommitMsgs map[uint32]*CommitMsg
 }
 
 // Type of msg

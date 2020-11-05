@@ -171,7 +171,7 @@ func newClientMsg() ClientMsg {
 
 type clientMsgAndProof struct {
 	clientMsg ClientMsg
-	commits   []*CommitMsg
+	commits   map[uint32]*CommitMsg
 }
 
 type fsm struct {
@@ -216,24 +216,28 @@ func (f *fsm) UpdateCheckpointInterval(v uint64) {
 }
 
 func (f *fsm) IsVDirty() bool {
-	panic("todo")
+	return false
 }
 func (f *fsm) IsNextCheckpointDirty() bool {
-	panic("todo")
+	return false
 }
 func (f *fsm) IsCheckpointIntervalDirty() bool {
-	panic("todo")
+	return false
 }
 func (f *fsm) IsHighWaterMarkDirty() bool {
-	panic("todo")
+	return false
 }
 func (f *fsm) IsConsensusPeersDirty() bool {
-	panic("todo")
+	return false
 }
 
-func (f *fsm) StoreAndExec(msg ClientMsg, commits []*CommitMsg, n uint64) {
+func (f *fsm) StoreAndExec(msg ClientMsg, commits map[uint32]*CommitMsg, n uint64) {
 	if len(commits) > 0 {
-		n = commits[0].N
+		for k := range commits {
+			n = commits[k].N
+			break
+		}
+
 	}
 	f.clientMsgAndProof[n] = clientMsgAndProof{clientMsg: msg, commits: commits}
 	f.digest2N[msg.Digest()] = n
@@ -243,7 +247,7 @@ func (f *fsm) StoreAndExec(msg ClientMsg, commits []*CommitMsg, n uint64) {
 	return
 }
 
-func (f *fsm) GetClientMsgAndProof(n uint64) (ClientMsg, []*CommitMsg) {
+func (f *fsm) GetClientMsgAndProof(n uint64) (ClientMsg, map[uint32]*CommitMsg) {
 	clientMsgAndProof, ok := f.clientMsgAndProof[n]
 	if !ok {
 		return nil, nil
