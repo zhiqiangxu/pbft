@@ -255,6 +255,7 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 		if exists {
 			nextHighest = highest + 1
 		} else {
+			// first client msg after being primary
 			nextHighest = consensusConfig.NextN
 		}
 	}
@@ -289,7 +290,8 @@ func (bft *pbft) constructPrePreparePiggybackedMsg(v, n uint64, msg ClientMsg) (
 func (bft *pbft) handlePrePreparePiggybackedMsg(msg *PrePreparePiggybackedMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 
-	if msg.View == consensusConfig.View && msg.PeerIndex == consensusConfig.Primary() {
+	if msg.View == consensusConfig.View && msg.PeerIndex == consensusConfig.Primary() && msg.N >= consensusConfig.NextN && msg.N <= bft.highestNAllowed() {
+
 		var p *PrepareMsg
 		p, err = bft.constructPrepareMsg(&msg.PrePrepareMsg)
 		if err != nil {
@@ -319,7 +321,8 @@ func (bft *pbft) handlePrepareMsg(msg *PrepareMsg) (err error) {
 
 	consensusConfig := bft.getConsensusConfig()
 
-	if msg.View == consensusConfig.View {
+	if msg.View == consensusConfig.View && msg.N >= consensusConfig.NextN && msg.N <= bft.highestNAllowed() {
+
 		if added, prepared := bft.msgPool.AddPrepareMsg(msg); added && prepared {
 			var c *CommitMsg
 			c, err = bft.constructCommitMsg(msg)
@@ -348,7 +351,7 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 
-	if msg.View == consensusConfig.View && msg.N >= consensusConfig.NextN {
+	if msg.View == consensusConfig.View && msg.N >= consensusConfig.NextN && msg.N <= bft.highestNAllowed() {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
 			// handle previous ones
 			if msg.N > consensusConfig.NextN {
