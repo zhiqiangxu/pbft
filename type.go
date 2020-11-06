@@ -3,6 +3,7 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ontio/ontology/common"
 )
@@ -97,6 +98,7 @@ type InitConsensusConfig struct {
 	N                  uint64
 	CheckpointInterval uint64
 	HighWaterMark      uint64
+	ViewChangeTimeout  time.Duration
 }
 
 // Validate InitConsensusConfig
@@ -129,6 +131,7 @@ type ConsensusConfig struct {
 	CheckpointInterval uint64
 	HighWaterMark      uint64
 	NextCheckpoint     uint64
+	ViewChangeTimeout  time.Duration
 }
 
 // Primary index
@@ -144,6 +147,7 @@ func (cconfig *ConsensusConfig) PrimaryOfView(v uint64) uint32 {
 const (
 	defaultCheckpointInterval = uint64(1)
 	defaultHighWaterMark      = uint64(100)
+	defaultViewChangeTimeout  = time.Second * 10
 )
 
 // Validate a Config
@@ -674,7 +678,7 @@ func (vc *ViewChangeMsg) Serialization(sink *common.ZeroCopySink) {
 type NewViewMsg struct {
 	Signature
 	NewView uint64
-	V       []*ViewChangeMsg
+	V       map[uint32] /*index*/ *ViewChangeMsg
 	O       []*PrePrepareMsg
 }
 
@@ -831,4 +835,27 @@ func (sync *SyncSealedClientMessageResp) Deserialization(source *common.ZeroCopy
 // Serialization a SyncSealedClientMessageResp
 func (sync *SyncSealedClientMessageResp) Serialization(sink *common.ZeroCopySink) {
 
+}
+
+// TimerEvent ...
+type TimerEvent int
+
+const (
+	// TimerEventViewChange ...
+	TimerEventViewChange TimerEvent = iota
+)
+
+// Event ...
+type Event interface {
+	Type() TimerEvent
+}
+
+// ViewChangeEvent ...
+type ViewChangeEvent struct {
+	NewView uint64
+}
+
+// Type of Event
+func (event *ViewChangeEvent) Type() TimerEvent {
+	return TimerEventViewChange
 }

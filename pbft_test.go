@@ -80,15 +80,31 @@ func TestPBft(t *testing.T) {
 
 	{
 		// test happy path
-		err := bft1.Send(context.Background(), &testClientMsg{n: 10})
+		err := bft2.Send(context.Background(), &testClientMsg{n: 10})
 		if err != nil {
 			t.Fatalf("Send failed:%v", err)
 		}
 
-		time.Sleep(time.Second)
+		time.Sleep(time.Millisecond * 100)
 
 		for _, fsm := range fsms {
 			if fsm.v != 10 {
+				t.Fatalf("fsm.v wrong:%v", fsm.v)
+			}
+		}
+	}
+
+	{
+		// test happy path
+		err := bft1.Send(context.Background(), &testClientMsg{n: 20})
+		if err != nil {
+			t.Fatalf("Send failed:%v", err)
+		}
+
+		time.Sleep(time.Millisecond * 100)
+
+		for _, fsm := range fsms {
+			if fsm.v != 30 {
 				t.Fatalf("fsm.v wrong:%v", fsm.v)
 			}
 		}
@@ -154,7 +170,14 @@ func (net *testNet) onPayload(payloadMsg *PayloadMsg) {
 }
 
 func (net *testNet) SendTo(peerIndex uint32, msg Msg) {
-
+	for index, netIndex := range net.index2netidx {
+		if index == peerIndex {
+			sink := common.NewZeroCopySink(nil)
+			msg.Serialization(sink)
+			payloadMsg := &PayloadMsg{Type: msg.Type(), Payload: sink.Bytes()}
+			net.nets[netIndex].onPayload(payloadMsg)
+		}
+	}
 }
 
 func (net *testNet) OnUpdateConsensusPeers([]PeerInfo) {
@@ -245,6 +268,7 @@ func (f *fsm) StoreAndExec(msg ClientMsg, commits map[uint32]*CommitMsg, n uint6
 	}
 	f.clientMsgAndProof[n] = clientMsgAndProof{clientMsg: msg, commits: commits}
 	f.digest2N[msg.Digest()] = n
+	f.currentConsensusConfig.NextN = n + 1
 
 	cm := msg.(*testClientMsg)
 	f.v += cm.n
@@ -294,6 +318,7 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 			NextCheckpoint:     n + initConsensusConfig.CheckpointInterval - 1,
 			CheckpointInterval: initConsensusConfig.CheckpointInterval,
 			HighWaterMark:      initConsensusConfig.HighWaterMark,
+			ViewChangeTimeout:  initConsensusConfig.ViewChangeTimeout,
 		}
 	} else {
 		f.currentConsensusConfig = &ConsensusConfig{
@@ -303,6 +328,7 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 			NextCheckpoint:     initConsensusConfig.N + initConsensusConfig.CheckpointInterval - 1,
 			CheckpointInterval: initConsensusConfig.CheckpointInterval,
 			HighWaterMark:      initConsensusConfig.HighWaterMark,
+			ViewChangeTimeout:  initConsensusConfig.ViewChangeTimeout,
 		}
 	}
 

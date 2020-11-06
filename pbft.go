@@ -19,16 +19,19 @@ type pbft struct {
 	accountIndex uint32
 	msgC         chan Msg
 	doneCh       chan struct{}
+	eventC       chan Event
 	wg           sync.WaitGroup
 	msgPool      *msgPool
 	msgSyncer    *msgSyncer
+	timer        *timer
 }
 
 // New a PBFT
 func New() PBFT {
-	bft := &pbft{doneCh: make(chan struct{})}
+	bft := &pbft{doneCh: make(chan struct{}), eventC: make(chan Event, 100)}
 	bft.msgPool = newMsgPool(bft)
 	bft.msgSyncer = newMsgSyncer(bft)
+	bft.timer = newTimer(bft, bft.eventC)
 	return bft
 }
 
@@ -67,6 +70,10 @@ func (bft *pbft) Start() (err error) {
 		if initConsensusConfig.HighWaterMark == 0 {
 			initConsensusConfig.HighWaterMark = defaultHighWaterMark
 		}
+		if initConsensusConfig.ViewChangeTimeout == 0 {
+			initConsensusConfig.ViewChangeTimeout = defaultViewChangeTimeout
+		}
+
 		bft.config.FSM.Start()
 		bft.config.FSM.InitConsensusConfig(initConsensusConfig)
 		bft.config.FSM.Commit()
@@ -178,7 +185,7 @@ func (bft *pbft) handleMsg() (err error) {
 	for {
 		select {
 		case msg := <-bft.msgC:
-			log.Println(goid.Get(), "got msg", msg.Type())
+			log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "got msg", msg.Type())
 			switch msg.Type() {
 			case MessageTypeClient:
 				err = bft.handleClientMsg(msg.(ClientMsg))
@@ -204,6 +211,14 @@ func (bft *pbft) handleMsg() (err error) {
 			if err != nil {
 				log.Println("handleMsg err, msg", msg, "err", err)
 				err = nil
+			}
+		case event := <-bft.eventC:
+			log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "got event", event.Type())
+			switch event.Type() {
+			case TimerEventViewChange:
+				err = bft.handleViewChangeEvent(event.(*ViewChangeEvent))
+			default:
+				err = fmt.Errorf("unexpected event type:%v", event.Type())
 			}
 		case <-bft.doneCh:
 			err = fmt.Errorf("bft stopped")
@@ -235,6 +250,23 @@ func (bft *pbft) highestNAllowed() (highestN uint64) {
 	return
 }
 
+func (bft *pbft) handleViewChangeEvent(event *ViewChangeEvent) (err error) {
+	consensusConfig := bft.getConsensusConfig()
+	if consensusConfig.View >= event.NewView {
+		return
+	}
+
+	var vc *ViewChangeMsg
+	vc, err = bft.constructViewChangeMsg(event.NewView, bft.msgPool.GetPrepared())
+	if err != nil {
+		return
+	}
+	err = bft.handleViewChangeMsg(vc)
+
+	bft.config.Net.Broadcast(vc)
+	return
+}
+
 func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 
 	err = bft.validateClientMsg(msg)
@@ -245,6 +277,8 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 	primary := consensusConfig.Primary()
 	if bft.accountIndex != primary {
+		bft.timer.ScheduleViewChange(msg.Digest(), consensusConfig.View+1, consensusConfig.ViewChangeTimeout)
+
 		bft.config.Net.SendTo(primary, msg)
 		return
 	}
@@ -317,7 +351,7 @@ func (bft *pbft) constructPrepareMsg(msg *PrePrepareMsg) (p *PrepareMsg, err err
 }
 
 func (bft *pbft) handlePrepareMsg(msg *PrepareMsg) (err error) {
-	log.Println(goid.Get(), "handlePrepareMsg")
+	log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "handlePrepareMsg")
 
 	consensusConfig := bft.getConsensusConfig()
 
@@ -365,6 +399,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 							continue
 						}
 
+						bft.timer.ClearViewChange(resp.ClientMsg.Digest())
 						bft.config.FSM.Start()
 						bft.config.FSM.StoreAndExec(resp.ClientMsg, resp.CommitMsgs, n)
 						bft.config.FSM.Commit()
@@ -389,6 +424,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 			}
+			bft.timer.ClearViewChange(clientMsg.Digest())
 			bft.config.FSM.Start()
 			bft.config.FSM.StoreAndExec(clientMsg, bft.msgPool.GetCommitMsgs(msg.N), msg.N)
 
@@ -419,7 +455,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 			}
 		}
 	} else {
-		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, consensusConfig.View = %v)", msg.View, consensusConfig.View)
+		err = fmt.Errorf("invalid CommitMsg(msg.View = %v, msg.N = %v, consensusConfig.View = %v, consensusConfig.NextN = %v)", msg.View, msg.N, consensusConfig.View, consensusConfig.NextN)
 	}
 	return
 }
@@ -448,16 +484,19 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 	if msg.NewView > consensusConfig.View && consensusConfig.PrimaryOfView(msg.NewView) == bft.accountIndex {
 		if added, enough := bft.msgPool.AddViewChangeMsg(msg); added && enough {
 			v, o := bft.msgPool.GetVO(msg.NewView)
-			var selfVC *ViewChangeMsg
-			for {
-				selfVC, err = bft.constructViewChangeMsg(msg.NewView, bft.msgPool.GetPrepared())
-				if err != nil {
-					log.Println("constructViewChangeMsg err", err)
-					time.Sleep(time.Second)
-					continue
+			if v[bft.accountIndex] == nil {
+				var selfVC *ViewChangeMsg
+				for {
+					selfVC, err = bft.constructViewChangeMsg(msg.NewView, bft.msgPool.GetPrepared())
+					if err != nil {
+						log.Println("constructViewChangeMsg err", err)
+						time.Sleep(time.Second)
+						continue
+					}
+
+					v[bft.accountIndex] = selfVC
+					break
 				}
-				v = append(v, selfVC)
-				break
 			}
 
 			var nv *NewViewMsg
@@ -479,7 +518,7 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 	return
 }
 
-func (bft *pbft) constructNewViewMsg(newView uint64, v []*ViewChangeMsg, o []*PrePrepareMsg) (msg *NewViewMsg, err error) {
+func (bft *pbft) constructNewViewMsg(newView uint64, v map[uint32] /*index*/ *ViewChangeMsg, o []*PrePrepareMsg) (msg *NewViewMsg, err error) {
 	msg = &NewViewMsg{NewView: newView, V: v, O: o, Signature: Signature{PeerIndex: bft.accountIndex}}
 	digest := msg.SignatureDigest()
 	sig, err := bft.config.Account.Sign(util.Slice(digest))

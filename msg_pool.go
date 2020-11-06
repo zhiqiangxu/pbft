@@ -183,7 +183,7 @@ func (pool *msgPool) AddCheckpointMsg(msg *CheckpointMsg) (added bool, checkpoin
 	}
 
 	quorum := pool.pbft.quorum()
-	added = len(round.checkpointMsgs) < quorum
+	added = len(round.checkpointMsgs) < quorum && round.checkpointMsgs[msg.PeerIndex] == nil
 	if !added {
 		return
 	}
@@ -206,7 +206,7 @@ func (pool *msgPool) AddViewChangeMsg(msg *ViewChangeMsg) (added bool, enough bo
 	}
 
 	quorum := pool.pbft.quorum()
-	added = len(msgsOfView)+1 < quorum
+	added = len(msgsOfView)+1 < quorum && msgsOfView[msg.PeerIndex] == nil
 	if !added {
 		return
 	}
@@ -217,7 +217,7 @@ func (pool *msgPool) AddViewChangeMsg(msg *ViewChangeMsg) (added bool, enough bo
 	return
 }
 
-func (pool *msgPool) GetVO(newView uint64) (v []*ViewChangeMsg, o []*PrePrepareMsg) {
+func (pool *msgPool) GetVO(newView uint64) (v map[uint32] /*index*/ *ViewChangeMsg, o []*PrePrepareMsg) {
 	return
 }
 
