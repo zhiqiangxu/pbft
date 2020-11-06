@@ -1,8 +1,8 @@
 package pbft
 
 type msgPool struct {
-	rounds         map[uint64]*consensusRound // indexed by N
-	viewChangeMsgs map[uint64]map[uint32]*ViewChangeMsg
+	rounds         map[uint64] /*N*/ *consensusRound
+	viewChangeMsgs map[uint64] /*view*/ map[uint32] /*index*/ *ViewChangeMsg
 	digest2N       map[string]uint64
 	highestN       uint64
 	pbft           *pbft
@@ -150,7 +150,7 @@ func (pool *msgPool) AddCommitMsg(msg *CommitMsg) (added bool, commitLocal bool)
 	return
 }
 
-func (pool *msgPool) isCommitLocal(n uint64, quorum int) bool {
+func (pool *msgPool) IsCommitLocal(n uint64, quorum int) bool {
 	round := pool.rounds[n]
 	if round == nil {
 		return false
@@ -163,7 +163,7 @@ func (pool *msgPool) isCommitLocal(n uint64, quorum int) bool {
 	return round.prePrepareMsg != nil && len(round.prepareMsgs)+1 == quorum && len(round.commitMsgs) == quorum
 }
 
-func (pool *msgPool) isPrepared(n uint64, quorum int) bool {
+func (pool *msgPool) IsPrepared(n uint64, quorum int) bool {
 	round := pool.rounds[n]
 	if round == nil {
 		return false
@@ -176,7 +176,7 @@ func (pool *msgPool) isPrepared(n uint64, quorum int) bool {
 	return round.prePrepareMsg != nil && len(round.prepareMsgs)+1 == quorum
 }
 
-func (pool *msgPool) AddCheckpointMsg(msg *CheckpointMsg) (added bool, checkpointed bool) {
+func (pool *msgPool) AddCheckpointMsg(msg *CheckpointMsg) (added bool, checkpointed bool, checkpointMsgs map[uint32]*CheckpointMsg) {
 	round := pool.rounds[msg.N]
 	if round == nil {
 		return
@@ -190,6 +190,10 @@ func (pool *msgPool) AddCheckpointMsg(msg *CheckpointMsg) (added bool, checkpoin
 	round.checkpointMsgs[msg.PeerIndex] = msg
 
 	checkpointed = len(round.checkpointMsgs) == quorum
+
+	if checkpointed {
+		checkpointMsgs = round.checkpointMsgs
+	}
 	return
 }
 

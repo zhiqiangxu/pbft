@@ -14,6 +14,7 @@ type FSM interface {
 	// genesis config
 	InitConsensusConfig(*InitConsensusConfig) // also updates history peers and execs optional genesis msg
 	StoreAndExec(ClientMsg, map[uint32]*CommitMsg, uint64 /*N*/)
+	Sealed(uint64, map[uint32]*CheckpointMsg)
 	UpdateV(uint64)
 	UpdateNextCheckpoint(uint64)
 	UpdateCheckpointInterval(uint64)

@@ -403,8 +403,9 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					}
 					break
 				}
-				if added, checkpointed := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
+				if added, checkpointed, checkpointMsgs := bft.msgPool.AddCheckpointMsg(checkPointMsg); added && checkpointed {
 					bft.msgPool.Sealed(msg.N)
+					bft.config.FSM.Sealed(msg.N, checkpointMsgs)
 				}
 
 				nextCheckpoint := bft.config.consensusConfig.NextCheckpoint + consensusConfig.CheckpointInterval
@@ -534,12 +535,13 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 }
 
 func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
-	if added, checkpointed := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
+	if added, checkpointed, checkpointMsgs := bft.msgPool.AddCheckpointMsg(msg); added && checkpointed {
 		consensusConfig := bft.getConsensusConfig()
 		nextCheckpoint := msg.N + consensusConfig.CheckpointInterval
 
 		bft.config.FSM.Start()
 		bft.config.FSM.UpdateNextCheckpoint(nextCheckpoint)
+		bft.config.FSM.Sealed(msg.N, checkpointMsgs)
 		bft.msgPool.Sealed(msg.N)
 		bft.config.FSM.Commit()
 		bft.onStateChanged()

@@ -191,6 +191,10 @@ func newTestFSM() *fsm {
 	}
 }
 
+func (f *fsm) Sealed(uint64, map[uint32]*CheckpointMsg) {
+
+}
+
 func (f *fsm) GetStateRoot() string {
 	return ""
 }
