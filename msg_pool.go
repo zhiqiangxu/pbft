@@ -218,6 +218,7 @@ func (pool *msgPool) AddViewChangeMsg(msg *ViewChangeMsg) (added bool, enough bo
 }
 
 func (pool *msgPool) GetVO(newView uint64) (v map[uint32] /*index*/ *ViewChangeMsg, o []*PrePrepareMsg) {
+	v = pool.viewChangeMsgs[newView]
 	return
 }
 

@@ -66,6 +66,7 @@ func TestPBft(t *testing.T) {
 					{Index: index3, Pubkey: account3.PublicKey()},
 					{Index: index4, Pubkey: account4.PublicKey()},
 				},
+				ViewChangeTimeout: time.Second,
 			}})
 	}
 
@@ -110,6 +111,52 @@ func TestPBft(t *testing.T) {
 		}
 	}
 
+	// test view change
+	bft1.(*pbft).setState(DropMsg)
+	fmt.Println("test view change")
+	{
+		// test happy path
+		for i, bft := range bfts {
+			if i != 0 {
+				err := bft.Send(context.Background(), &testClientMsg{n: 5})
+				if err != nil {
+					t.Fatalf("Send failed:%v", err)
+				}
+			}
+		}
+
+		time.Sleep(time.Second * 2)
+
+		for i, fsm := range fsms {
+			if fsm.v != 30 {
+				t.Fatalf("fsm.v wrong:%v", fsm.v)
+			}
+			if i != 0 {
+				if bfts[i].(*pbft).getConsensusConfig().View != 1 {
+					t.Fatalf("view wrong:%v", bfts[i].(*pbft).getConsensusConfig().View)
+				}
+			}
+		}
+	}
+
+	{
+		// test after view change
+		err := bft2.Send(context.Background(), &testClientMsg{n: 5})
+		if err != nil {
+			t.Fatalf("Send failed:%v", err)
+		}
+
+		time.Sleep(time.Millisecond * 100)
+
+		for i, fsm := range fsms {
+			if i != 0 {
+				if fsm.v != 35 {
+					t.Fatalf("fsm.v wrong:%v", fsm.v)
+				}
+			}
+
+		}
+	}
 }
 
 type testClientMsg struct {

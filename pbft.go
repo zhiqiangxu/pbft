@@ -15,6 +15,7 @@ import (
 )
 
 type pbft struct {
+	state        State
 	config       *Config
 	accountIndex uint32
 	msgC         chan Msg
@@ -25,6 +26,16 @@ type pbft struct {
 	msgSyncer    *msgSyncer
 	timer        *timer
 }
+
+// State of pbft
+type State int32
+
+const (
+	// Ready to handle msg
+	Ready State = iota
+	// DropMsg for test
+	DropMsg
+)
 
 // New a PBFT
 func New() PBFT {
@@ -94,6 +105,7 @@ func (bft *pbft) Start() (err error) {
 
 	// start to handle msg
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
+
 	util.GoFunc(&bft.wg, func() {
 		err := bft.handleMsg()
 		log.Println("handleMsg quit", err)
@@ -114,6 +126,14 @@ func (bft *pbft) refreshConsensusConfig() {
 // cached version
 func (bft *pbft) getConsensusConfig() *ConsensusConfig {
 	return (*ConsensusConfig)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&bft.config.consensusConfig))))
+}
+
+func (bft *pbft) setState(state State) {
+	atomic.StoreInt32((*int32)(&bft.state), int32(state))
+}
+
+func (bft *pbft) getState() State {
+	return (State)(atomic.LoadInt32((*int32)(&bft.state)))
 }
 
 func (bft *pbft) Stop() (err error) {
@@ -186,6 +206,10 @@ func (bft *pbft) handleMsg() (err error) {
 		select {
 		case msg := <-bft.msgC:
 			log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "got msg", msg.Type())
+			if bft.getState() == DropMsg {
+				log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "dropped msg", msg.Type())
+				continue
+			}
 			switch msg.Type() {
 			case MessageTypeClient:
 				err = bft.handleClientMsg(msg.(ClientMsg))
@@ -277,6 +301,7 @@ func (bft *pbft) handleClientMsg(msg ClientMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 	primary := consensusConfig.Primary()
 	if bft.accountIndex != primary {
+		log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "ScheduleViewChange", consensusConfig.ViewChangeTimeout)
 		bft.timer.ScheduleViewChange(msg.Digest(), consensusConfig.View+1, consensusConfig.ViewChangeTimeout)
 
 		bft.config.Net.SendTo(primary, msg)
@@ -513,12 +538,13 @@ func (bft *pbft) handleViewChangeMsg(msg *ViewChangeMsg) (err error) {
 			bft.onStateChanged()
 		}
 	} else {
-		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d)\n", consensusConfig.PrimaryOfView(msg.NewView), msg.NewView, bft.accountIndex)
+		log.Printf("ViewChangeMsg dropped for not being primary(%d) of specified view(%d), accountIndex(%d) consensusConfig.View(%d)\n", consensusConfig.PrimaryOfView(msg.NewView), msg.NewView, bft.accountIndex, consensusConfig.View)
 	}
 	return
 }
 
 func (bft *pbft) constructNewViewMsg(newView uint64, v map[uint32] /*index*/ *ViewChangeMsg, o []*PrePrepareMsg) (msg *NewViewMsg, err error) {
+
 	msg = &NewViewMsg{NewView: newView, V: v, O: o, Signature: Signature{PeerIndex: bft.accountIndex}}
 	digest := msg.SignatureDigest()
 	sig, err := bft.config.Account.Sign(util.Slice(digest))
@@ -567,7 +593,7 @@ func (bft *pbft) handleNewViewMsg(msg *NewViewMsg) (err error) {
 		bft.onStateChanged()
 
 	} else {
-		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, consensusConfig.View = %v, msg.PeerIndex = %v, consensusConfig.PrimaryOfView(msg.NewView) = %v)", msg.NewView, consensusConfig.View, msg.PeerIndex, consensusConfig.PrimaryOfView(msg.NewView))
+		err = fmt.Errorf("invalid NewViewMsg(msg.NewView = %v, consensusConfig.View = %v, msg.PeerIndex = %v, bft.accountIndex = %v, consensusConfig.PrimaryOfView(msg.NewView) = %v)", msg.NewView, consensusConfig.View, msg.PeerIndex, bft.accountIndex, consensusConfig.PrimaryOfView(msg.NewView))
 	}
 
 	return

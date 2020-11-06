@@ -693,13 +693,70 @@ func (nv *NewViewMsg) SignatureDigest() string {
 }
 
 // Deserialization a NewViewMsg
-func (nv *NewViewMsg) Deserialization(source *common.ZeroCopySource) error {
-	return nil
+func (nv *NewViewMsg) Deserialization(source *common.ZeroCopySource) (err error) {
+	err = nv.Signature.Deserialization(source)
+	if err != nil {
+		return
+	}
+
+	newView, eof := source.NextUint64()
+	if eof {
+		err = fmt.Errorf("NewViewMsg Deserialization unexpected eof reading newView")
+		return
+	}
+	nv.NewView = newView
+
+	vsize, eof := source.NextUint16()
+	if eof {
+		err = fmt.Errorf("NewViewMsg Deserialization unexpected eof reading vsize")
+		return
+	}
+
+	nv.V = make(map[uint32]*ViewChangeMsg)
+	for i := uint16(0); i < vsize; i++ {
+		index, eof := source.NextUint32()
+		if eof {
+			err = fmt.Errorf("NewViewMsg Deserialization unexpected eof reading index")
+			return
+		}
+		vc := &ViewChangeMsg{}
+		err = vc.Deserialization(source)
+		if err != nil {
+			return
+		}
+		nv.V[index] = vc
+	}
+
+	osize, eof := source.NextUint16()
+	if eof {
+		err = fmt.Errorf("NewViewMsg Deserialization unexpected eof reading osize")
+		return
+	}
+	for i := uint16(0); i < osize; i++ {
+		var ppm PrePrepareMsg
+		err = ppm.Deserialization(source)
+		if err != nil {
+			return
+		}
+
+		nv.O = append(nv.O, &ppm)
+	}
+	return
 }
 
 // Serialization a NewViewMsg
 func (nv *NewViewMsg) Serialization(sink *common.ZeroCopySink) {
-
+	nv.Signature.Serialization(sink)
+	sink.WriteUint64(nv.NewView)
+	sink.WriteUint16(uint16(len(nv.V)))
+	for index, vc := range nv.V {
+		sink.WriteUint32(index)
+		vc.Serialization(sink)
+	}
+	sink.WriteUint16(uint16(len(nv.O)))
+	for _, ppm := range nv.O {
+		ppm.Serialization(sink)
+	}
 }
 
 // CheckpointMsg ...
