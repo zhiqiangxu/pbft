@@ -529,6 +529,34 @@ func (ckpt *CheckpointMsg) Serialization(sink *common.ZeroCopySink) {
 
 }
 
+// HeartBeatMsg ...
+type HeartBeatMsg struct {
+	Signature
+	NextN      uint64
+	Commits    []*CommitMsg
+	Checkpoint *CheckpointMsg
+}
+
+// Type of msg
+func (sync *HeartBeatMsg) Type() MessageType {
+	return MessageTypeHeartBeat
+}
+
+// SignatureDigest of msg
+func (sync *HeartBeatMsg) SignatureDigest() string {
+	return ""
+}
+
+// Deserialization a HeartBeatMsg
+func (sync *HeartBeatMsg) Deserialization(source *common.ZeroCopySource) error {
+	return nil
+}
+
+// Serialization a HeartBeatMsg
+func (sync *HeartBeatMsg) Serialization(sink *common.ZeroCopySink) {
+
+}
+
 // SyncClientMessageReq ...
 type SyncClientMessageReq struct {
 	ReqID uint64 // updated by msg syncer
@@ -645,4 +673,13 @@ type ViewChangeEvent struct {
 // Type of Event
 func (event *ViewChangeEvent) Type() TimerEvent {
 	return TimerEventViewChange
+}
+
+// HeartBeatEvent ...
+type HeartBeatEvent struct {
+}
+
+// Type of Event
+func (event *HeartBeatEvent) Type() TimerEvent {
+	return TimerEventHeartBeat
 }

@@ -92,13 +92,14 @@ var NewClientMsgFunc func() ClientMsg
 
 // InitConsensusConfig should never change since day 1
 type InitConsensusConfig struct {
-	GenesisMsg         ClientMsg // optional
-	Peers              []PeerInfo
-	View               uint64
-	N                  uint64
-	CheckpointInterval uint64
-	HighWaterMark      uint64
-	ViewChangeTimeout  time.Duration
+	GenesisMsg           ClientMsg // optional
+	Peers                []PeerInfo
+	View                 uint64
+	N                    uint64
+	CheckpointInterval   uint64
+	HighWaterMark        uint64
+	ViewChangeTimeout    time.Duration
+	PeerHeartBeatTimeout time.Duration
 }
 
 // Validate InitConsensusConfig
@@ -125,13 +126,14 @@ func (iconfig *InitConsensusConfig) Validate() (err error) {
 
 // ConsensusConfig is persisted to db
 type ConsensusConfig struct {
-	Peers              []PeerInfo
-	View               uint64
-	NextN              uint64
-	CheckpointInterval uint64
-	HighWaterMark      uint64
-	NextCheckpoint     uint64
-	ViewChangeTimeout  time.Duration
+	Peers                []PeerInfo
+	View                 uint64
+	NextN                uint64
+	CheckpointInterval   uint64
+	HighWaterMark        uint64
+	NextCheckpoint       uint64
+	ViewChangeTimeout    time.Duration
+	PeerHeartBeatTimeout time.Duration
 }
 
 // Primary index
@@ -145,9 +147,10 @@ func (cconfig *ConsensusConfig) PrimaryOfView(v uint64) uint32 {
 }
 
 const (
-	defaultCheckpointInterval = uint64(1)
-	defaultHighWaterMark      = uint64(100)
-	defaultViewChangeTimeout  = time.Second * 10
+	defaultCheckpointInterval   = uint64(1)
+	defaultHighWaterMark        = uint64(100)
+	defaultViewChangeTimeout    = time.Second * 10
+	defaultPeerHeartBeatTimeout = time.Minute
 )
 
 // Validate a Config
@@ -222,6 +225,8 @@ func (mt MessageType) String() string {
 		return "MessageTypeNewView"
 	case MessageTypeCheckpoint:
 		return "MessageTypeCheckpoint"
+	case MessageTypeHeartBeat:
+		return "MessageTypeHeartBeat"
 	case MessageTypeSyncClientMessageReq:
 		return "MessageTypeSyncClientMessageReq"
 	case MessageTypeSyncSealedClientMessageReq:
@@ -253,6 +258,8 @@ const (
 	// MessageTypeCheckpoint for checkpoint msg
 	MessageTypeCheckpoint
 
+	// MessageTypeHeartBeat for heartbeat msg
+	MessageTypeHeartBeat
 	// MessageTypeSyncClientMessageReq for sync client msg
 	MessageTypeSyncClientMessageReq
 	// MessageTypeSyncSealedClientMessageReq for sync client msg with proof
@@ -263,18 +270,22 @@ const (
 	MessageTypeSyncSealedClientMessageResp
 )
 
-// TimerEvent ...
-type TimerEvent int
+// EventType ...
+type EventType int
 
 const (
-	// TimerEventViewChange ...
-	TimerEventViewChange TimerEvent = iota
+	// EventTypeViewChange ...
+	EventTypeViewChange EventType = iota
+	// EventTypeHeartBeat ...
+	EventTypeHeartBeat
 )
 
-func (ev TimerEvent) String() string {
+func (ev EventType) String() string {
 	switch ev {
-	case TimerEventViewChange:
-		return "TimerEventViewChange"
+	case EventTypeViewChange:
+		return "EventTypeViewChange"
+	case EventTypeHeartBeat:
+		return "EventTypeHeartBeat"
 	default:
 		panic(fmt.Sprintf("unkown event type:%d", ev))
 	}
@@ -282,5 +293,5 @@ func (ev TimerEvent) String() string {
 
 // Event ...
 type Event interface {
-	Type() TimerEvent
+	Type() EventType
 }

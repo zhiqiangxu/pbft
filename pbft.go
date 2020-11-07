@@ -84,6 +84,9 @@ func (bft *pbft) Start() (err error) {
 		if initConsensusConfig.ViewChangeTimeout == 0 {
 			initConsensusConfig.ViewChangeTimeout = defaultViewChangeTimeout
 		}
+		if initConsensusConfig.PeerHeartBeatTimeout == 0 {
+			initConsensusConfig.PeerHeartBeatTimeout = defaultPeerHeartBeatTimeout
+		}
 
 		bft.config.FSM.Start()
 		bft.config.FSM.InitConsensusConfig(initConsensusConfig)
@@ -102,6 +105,9 @@ func (bft *pbft) Start() (err error) {
 
 	// 3. init self index
 	bft.accountIndex = bft.config.FSM.GetIndexByPubkey(bft.config.Account.PublicKey())
+
+	// schedule heartbeat
+	bft.timer.ScheduleHeartBeat(bft.config.consensusConfig.PeerHeartBeatTimeout)
 
 	// start to handle msg
 	bft.msgC = make(chan Msg, bft.config.TuningOptions.MsgCSize)
@@ -225,6 +231,8 @@ func (bft *pbft) handleMsg() (err error) {
 				err = bft.handleNewViewMsg(msg.(*NewViewMsg))
 			case MessageTypeCheckpoint:
 				err = bft.handleCheckpointMsg(msg.(*CheckpointMsg))
+			case MessageTypeHeartBeat:
+				err = bft.handleHeartBeatMsg(msg.(*HeartBeatMsg))
 			case MessageTypeSyncClientMessageReq:
 				err = bft.handleSyncClientMessageReq(msg.(*SyncClientMessageReq))
 			case MessageTypeSyncSealedClientMessageReq:
@@ -241,6 +249,8 @@ func (bft *pbft) handleMsg() (err error) {
 			switch event.Type() {
 			case TimerEventViewChange:
 				err = bft.handleViewChangeEvent(event.(*ViewChangeEvent))
+			case TimerEventHeartBeat:
+				err = bft.handleHeartBeatEvent(event.(*HeartBeatEvent))
 			default:
 				err = fmt.Errorf("unexpected event type:%v", event.Type())
 			}
@@ -280,14 +290,24 @@ func (bft *pbft) handleViewChangeEvent(event *ViewChangeEvent) (err error) {
 		return
 	}
 
-	var vc *ViewChangeMsg
-	vc, err = bft.constructViewChangeMsg(event.NewView, bft.msgPool.GetPrepared())
+	vc, err := bft.constructViewChangeMsg(event.NewView, bft.msgPool.GetPrepared())
 	if err != nil {
 		return
 	}
 	err = bft.handleViewChangeMsg(vc)
 
 	bft.config.Net.Broadcast(vc)
+	return
+}
+
+func (bft *pbft) handleHeartBeatEvent(event *HeartBeatEvent) (err error) {
+	hb, err := bft.constructHeartBeatMsg()
+	if err != nil {
+		return
+	}
+
+	bft.config.Net.Broadcast(hb)
+
 	return
 }
 
@@ -407,6 +427,28 @@ func (bft *pbft) constructCommitMsg(msg *PrepareMsg) (c *CommitMsg, err error) {
 	return
 }
 
+// sync sealed msgs in range [from, to)
+func (bft *pbft) syncSealedMsgs(from, to uint64) {
+	for n := from; n < to; n++ {
+		for {
+			resp, err := bft.msgSyncer.SyncSealedClientMsg(context.Background(), n)
+			if err != nil {
+				time.Sleep(time.Second)
+				log.Println("SyncSealedClientMsg err", err)
+				continue
+			}
+
+			bft.timer.CancelViewChange(resp.ClientMsg.Digest())
+			bft.config.FSM.Start()
+			bft.config.FSM.StoreAndExec(resp.ClientMsg, resp.CommitMsgs, n)
+			bft.config.FSM.Commit()
+			bft.onStateChanged()
+			break
+		}
+	}
+	return
+}
+
 func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 	consensusConfig := bft.getConsensusConfig()
 
@@ -414,25 +456,8 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 		if added, commitLocal := bft.msgPool.AddCommitMsg(msg); added && commitLocal {
 			// handle previous ones
 			if msg.N > consensusConfig.NextN {
-				for n := consensusConfig.NextN; n < msg.N; n++ {
-					var resp *SyncSealedClientMessageResp
-					for {
-						resp, err = bft.msgSyncer.SyncSealedClientMsg(context.Background(), n)
-						if err != nil {
-							time.Sleep(time.Second)
-							log.Println("SyncSealedClientMsg err", err)
-							continue
-						}
-
-						bft.timer.ClearViewChange(resp.ClientMsg.Digest())
-						bft.config.FSM.Start()
-						bft.config.FSM.StoreAndExec(resp.ClientMsg, resp.CommitMsgs, n)
-						bft.config.FSM.Commit()
-						bft.onStateChanged()
-						consensusConfig = bft.getConsensusConfig()
-						break
-					}
-				}
+				bft.syncSealedMsgs(consensusConfig.NextN, msg.N)
+				consensusConfig = bft.getConsensusConfig()
 			}
 			// persist to db
 			clientMsg := bft.msgPool.GetClientMsg(msg.N)
@@ -449,7 +474,7 @@ func (bft *pbft) handleCommitMsg(msg *CommitMsg) (err error) {
 					break
 				}
 			}
-			bft.timer.ClearViewChange(clientMsg.Digest())
+			bft.timer.CancelViewChange(clientMsg.Digest())
 			bft.config.FSM.Start()
 			bft.config.FSM.StoreAndExec(clientMsg, bft.msgPool.GetCommitMsgs(msg.N), msg.N)
 
@@ -500,6 +525,15 @@ func (bft *pbft) constructViewChangeMsg(newView uint64, prepared []Prepared) (vc
 	digest := vc.SignatureDigest()
 	sig, err := bft.config.Account.Sign(util.Slice(digest))
 	vc.Signature.Sig = sig
+	return
+}
+
+func (bft *pbft) constructHeartBeatMsg() (hb *HeartBeatMsg, err error) {
+	hb = &HeartBeatMsg{NextN: bft.getConsensusConfig().NextN, Signature: Signature{PeerIndex: bft.accountIndex}}
+
+	digest := hb.SignatureDigest()
+	sig, err := bft.config.Account.Sign(util.Slice(digest))
+	hb.Signature.Sig = sig
 	return
 }
 
@@ -610,6 +644,15 @@ func (bft *pbft) handleCheckpointMsg(msg *CheckpointMsg) (err error) {
 		bft.msgPool.Sealed(msg.N)
 		bft.config.FSM.Commit()
 		bft.onStateChanged()
+	}
+	return
+}
+
+func (bft *pbft) handleHeartBeatMsg(msg *HeartBeatMsg) (err error) {
+	// TODO handle evil heartbeat msg
+	consensusConfig := bft.getConsensusConfig()
+	if msg.NextN > consensusConfig.NextN {
+		bft.syncSealedMsgs(consensusConfig.NextN, msg.NextN)
 	}
 	return
 }

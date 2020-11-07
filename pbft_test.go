@@ -359,23 +359,25 @@ func (f *fsm) InitConsensusConfig(initConsensusConfig *InitConsensusConfig) {
 		f.StoreAndExec(initConsensusConfig.GenesisMsg, nil, initConsensusConfig.N)
 		n := initConsensusConfig.N + 1
 		f.currentConsensusConfig = &ConsensusConfig{
-			Peers:              initConsensusConfig.Peers,
-			View:               initConsensusConfig.View,
-			NextN:              n,
-			NextCheckpoint:     n + initConsensusConfig.CheckpointInterval - 1,
-			CheckpointInterval: initConsensusConfig.CheckpointInterval,
-			HighWaterMark:      initConsensusConfig.HighWaterMark,
-			ViewChangeTimeout:  initConsensusConfig.ViewChangeTimeout,
+			Peers:                initConsensusConfig.Peers,
+			View:                 initConsensusConfig.View,
+			NextN:                n,
+			NextCheckpoint:       n + initConsensusConfig.CheckpointInterval - 1,
+			CheckpointInterval:   initConsensusConfig.CheckpointInterval,
+			HighWaterMark:        initConsensusConfig.HighWaterMark,
+			ViewChangeTimeout:    initConsensusConfig.ViewChangeTimeout,
+			PeerHeartBeatTimeout: initConsensusConfig.PeerHeartBeatTimeout,
 		}
 	} else {
 		f.currentConsensusConfig = &ConsensusConfig{
-			Peers:              initConsensusConfig.Peers,
-			View:               initConsensusConfig.View,
-			NextN:              initConsensusConfig.N,
-			NextCheckpoint:     initConsensusConfig.N + initConsensusConfig.CheckpointInterval - 1,
-			CheckpointInterval: initConsensusConfig.CheckpointInterval,
-			HighWaterMark:      initConsensusConfig.HighWaterMark,
-			ViewChangeTimeout:  initConsensusConfig.ViewChangeTimeout,
+			Peers:                initConsensusConfig.Peers,
+			View:                 initConsensusConfig.View,
+			NextN:                initConsensusConfig.N,
+			NextCheckpoint:       initConsensusConfig.N + initConsensusConfig.CheckpointInterval - 1,
+			CheckpointInterval:   initConsensusConfig.CheckpointInterval,
+			HighWaterMark:        initConsensusConfig.HighWaterMark,
+			ViewChangeTimeout:    initConsensusConfig.ViewChangeTimeout,
+			PeerHeartBeatTimeout: initConsensusConfig.PeerHeartBeatTimeout,
 		}
 	}
 
