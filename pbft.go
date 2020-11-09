@@ -247,9 +247,9 @@ func (bft *pbft) handleMsg() (err error) {
 		case event := <-bft.eventC:
 			log.Println("G", goid.Get(), "accountIndex", bft.accountIndex, "got event", event.Type())
 			switch event.Type() {
-			case TimerEventViewChange:
+			case EventTypeViewChange:
 				err = bft.handleViewChangeEvent(event.(*ViewChangeEvent))
-			case TimerEventHeartBeat:
+			case EventTypeHeartBeat:
 				err = bft.handleHeartBeatEvent(event.(*HeartBeatEvent))
 			default:
 				err = fmt.Errorf("unexpected event type:%v", event.Type())

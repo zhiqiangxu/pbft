@@ -671,8 +671,8 @@ type ViewChangeEvent struct {
 }
 
 // Type of Event
-func (event *ViewChangeEvent) Type() TimerEvent {
-	return TimerEventViewChange
+func (event *ViewChangeEvent) Type() EventType {
+	return EventTypeViewChange
 }
 
 // HeartBeatEvent ...
@@ -680,6 +680,6 @@ type HeartBeatEvent struct {
 }
 
 // Type of Event
-func (event *HeartBeatEvent) Type() TimerEvent {
-	return TimerEventHeartBeat
+func (event *HeartBeatEvent) Type() EventType {
+	return EventTypeHeartBeat
 }
