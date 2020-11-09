@@ -98,7 +98,7 @@ func (bft *pbft) Start() (err error) {
 	// load all states from FSM
 
 	// 1. refresh consensus config
-	bft.refreshConsensusConfig()
+	bft.RefreshConsensusConfig()
 
 	// 2. init net with history peers
 	bft.config.Net.OnUpdateConsensusPeers(bft.config.FSM.GetHistoryPeers())
@@ -121,7 +121,7 @@ func (bft *pbft) Start() (err error) {
 }
 
 // load from state
-func (bft *pbft) refreshConsensusConfig() {
+func (bft *pbft) RefreshConsensusConfig() {
 	config := bft.config.FSM.GetConsensusConfig()
 	if config == nil {
 		log.Fatal("GetConsensusConfig returns nil")
@@ -158,7 +158,7 @@ const (
 
 func (bft *pbft) onStateChanged() {
 
-	bft.refreshConsensusConfig()
+	bft.RefreshConsensusConfig()
 	consensusConfig := bft.getConsensusConfig()
 
 	if bft.config.FSM.IsConsensusPeersDirty() {

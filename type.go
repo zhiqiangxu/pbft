@@ -202,6 +202,7 @@ type PBFT interface {
 	Stop() error
 
 	Send(context.Context, Msg) error
+	RefreshConsensusConfig()
 }
 
 // MessageType for pbft
